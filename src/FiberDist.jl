@@ -10,10 +10,14 @@ using KernelAbstractions
 using GLMakie
 using DistanceTransforms
 using Interpolations
+using DataStructures
 
+include("typedefs.jl")
 include("meshgen.jl")
 include("voxelize.jl")
+include("eikonal.jl")
+include("fot_estimator.jl")
 
-export load_step_mesh_as_surface
+
 
 end # module FiberDist

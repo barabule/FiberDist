@@ -207,6 +207,272 @@ end
 
 
 
+"""
+    cartesian_upwind_3d(T, i, j, k, F, dx, dy, dz)
+
+Solves the exact 3D Cartesian upwind quadratic equation:
+  max((T - Tx)/dx, 0)^2 + max((T - Ty)/dy, 0)^2 + max((T - Tz)/dz, 0)^2 = 1 / F^2
+using minimum accepted neighbor values along each axis.
+"""
+function cartesian_upwind_3d(
+    T::Array{Float32, 3},
+    i::Int, j::Int, k::Int,
+    F::Float32,
+    dx::Float32, dy::Float32, dz::Float32
+)
+    nx, ny, nz = size(T)
+
+    tx = min(i > 1 ? T[i-1, j, k] : Inf32, i < nx ? T[i+1, j, k] : Inf32)
+    ty = min(j > 1 ? T[i, j-1, k] : Inf32, j < ny ? T[i, j+1, k] : Inf32)
+    tz = min(k > 1 ? T[i, j, k-1] : Inf32, k < nz ? T[i, j, k+1] : Inf32)
+
+    # Sort active upwind dimensions by arrival time: t1 <= t2 <= t3
+    dims = (
+        (tx, dx),
+        (ty, dy),
+        (tz, dz)
+    )
+    # Manual 3-element sort to stay allocation-free
+    d1, d2, d3 = dims[1], dims[2], dims[3]
+    if d1[1] > d2[1]; d1, d2 = d2, d1; end
+    if d2[1] > d3[1]; d2, d3 = d3, d2; end
+    if d1[1] > d2[1]; d1, d2 = d2, d1; end
+
+    invF = 1.0f0 / F
+    t1, h1 = d1
+    !isfinite(t1) && return Inf32
+
+    # 1D update
+    t_cand = t1 + h1 * invF
+
+    # 2D quadratic update if second neighbor is behind current candidate
+    t2, h2 = d2
+    if isfinite(t2) && t2 < t_cand
+        a = (1.0f0 / h1^2) + (1.0f0 / h2^2)
+        b = -2.0f0 * (t1 / h1^2 + t2 / h2^2)
+        c = (t1^2 / h1^2) + (t2^2 / h2^2) - invF^2
+        disc = b^2 - 4.0f0 * a * c
+        if disc >= 0.0f0
+            t_cand = (-b + sqrt(disc)) / (2.0f0 * a)
+        end
+    end
+
+    # 3D quadratic update if third neighbor is behind current candidate
+    t3, h3 = d3
+    if isfinite(t3) && t3 < t_cand
+        a = (1.0f0 / h1^2) + (1.0f0 / h2^2) + (1.0f0 / h3^2)
+        b = -2.0f0 * (t1 / h1^2 + t2 / h2^2 + t3 / h3^2)
+        c = (t1^2 / h1^2) + (t2^2 / h2^2) + (t3^2 / h3^2) - invF^2
+        disc = b^2 - 4.0f0 * a * c
+        if disc >= 0.0f0
+            t_cand = (-b + sqrt(disc)) / (2.0f0 * a)
+        end
+    end
+
+    return t_cand
+end
+
+"""
+    solve_eikonal_voxel(voxel_grid, thickness_field, voxel_spacing, min_pt, gates; min_thickness=0.1f0)
+
+Solves the 3D Eikonal equation on interior solid voxels using Fast Marching.
+"""
+function solve_eikonal_voxel(
+    voxel_grid::AbstractArray{Bool, 3},
+    thickness_field::Array{Float32, 3},
+    voxel_spacing,
+    min_pt,
+    gates::Vector{ValveGate};
+    min_thickness::Float32 = 0.1f0
+)
+    nx, ny, nz = size(voxel_grid)
+    dx, dy, dz = Float32.(voxel_spacing)
+
+    T = fill(Inf32, nx, ny, nz)
+    accepted = falses(nx, ny, nz)
+    pq = PriorityQueue{CartesianIndex{3}, Float32}()
+
+    # Helper: convert world coordinate to nearest interior voxel
+    function find_nearest_interior_voxel(pos::Point3f)
+        best_idx = CartesianIndex(1, 1, 1)
+        best_dist_sq = Inf32
+        for k in 1:nz, j in 1:ny, i in 1:nx
+            voxel_grid[i, j, k] || continue
+            vx = min_pt[1] + (i - 0.5f0) * dx
+            vy = min_pt[2] + (j - 0.5f0) * dy
+            vz = min_pt[3] + (k - 0.5f0) * dz
+            d2 = (vx - pos[1])^2 + (vy - pos[2])^2 + (vz - pos[3])^2
+            if d2 < best_dist_sq
+                best_dist_sq = d2
+                best_idx = CartesianIndex(i, j, k)
+            end
+        end
+        return best_idx
+    end
+
+    # Seed gates (supporting cascaded opening times)
+    for gate in gates
+        idx = find_nearest_interior_voxel(gate.position)
+        if gate.open_time < T[idx]
+            T[idx] = gate.open_time
+            pq[idx] = gate.open_time
+        end
+    end
+
+    offsets = (
+        CartesianIndex(-1, 0, 0), CartesianIndex(1, 0, 0),
+        CartesianIndex(0, -1, 0), CartesianIndex(0, 1, 0),
+        CartesianIndex(0, 0, -1), CartesianIndex(0, 0, 1)
+    )
+
+    while !isempty(pq)
+        curr, curr_t = dequeue_pair!(pq)
+        accepted[curr] && continue
+        accepted[curr] = true
+
+        for off in offsets
+            nbr = curr + off
+            i, j, k = Tuple(nbr)
+            (1 <= i <= nx && 1 <= j <= ny && 1 <= k <= nz) || continue
+            (voxel_grid[i, j, k] && !accepted[i, j, k]) || continue
+
+            F_local = max(thickness_field[i, j, k], min_thickness)^2
+            t_cand = cartesian_upwind_3d(T, i, j, k, F_local, dx, dy, dz)
+
+            if t_cand < T[i, j, k]
+                T[i, j, k] = t_cand
+                pq[nbr] = t_cand
+            end
+        end
+    end
+
+    return T
+end
+
+"""
+    project_voxel_eikonal_to_mesh(T, voxel_grid, voxel_spacing, min_pt, centroids, normals)
+
+Computes clean one-sided gradients on the interior voxel grid and projects
+arrival times and tangent flow direction vectors onto surface triangle centroids.
+"""
+function project_voxel_eikonal_to_mesh(
+    T::Array{Float32, 3},
+    voxel_grid::AbstractArray{Bool, 3},
+    voxel_spacing,
+    min_pt,
+    centroids::Vector{Point3f},
+    normals::Vector{SVector{3, Float32}}
+)
+    nx, ny, nz = size(T)
+    dx, dy, dz = Float32.(voxel_spacing)
+
+    # 1. Compute interior-only gradient field (gx, gy, gz) using valid neighbors
+    gx = zeros(Float32, nx, ny, nz)
+    gy = zeros(Float32, nx, ny, nz)
+    gz = zeros(Float32, nx, ny, nz)
+
+    for k in 1:nz, j in 1:ny, i in 1:nx
+        (voxel_grid[i, j, k] && isfinite(T[i, j, k])) || continue
+        tc = T[i, j, k]
+
+        # X derivative (central if both interior, one-sided at boundary)
+        has_xm = i > 1  && voxel_grid[i-1, j, k] && isfinite(T[i-1, j, k])
+        has_xp = i < nx && voxel_grid[i+1, j, k] && isfinite(T[i+1, j, k])
+        gx[i, j, k] = if has_xm && has_xp
+            (T[i+1, j, k] - T[i-1, j, k]) / (2.0f0 * dx)
+        elseif has_xp
+            (T[i+1, j, k] - tc) / dx
+        elseif has_xm
+            (tc - T[i-1, j, k]) / dx
+        else
+            0.0f0
+        end
+
+        # Y derivative
+        has_ym = j > 1  && voxel_grid[i, j-1, k] && isfinite(T[i, j-1, k])
+        has_yp = j < ny && voxel_grid[i, j+1, k] && isfinite(T[i, j+1, k])
+        gy[i, j, k] = if has_ym && has_yp
+            (T[i, j+1, k] - T[i, j-1, k]) / (2.0f0 * dy)
+        elseif has_yp
+            (T[i, j+1, k] - tc) / dy
+        elseif has_ym
+            (tc - T[i, j-1, k]) / dy
+        else
+            0.0f0
+        end
+
+        # Z derivative
+        has_zm = k > 1  && voxel_grid[i, j, k-1] && isfinite(T[i, j, k-1])
+        has_zp = k < nz && voxel_grid[i, j, k+1] && isfinite(T[i, j, k+1])
+        gz[i, j, k] = if has_zm && has_zp
+            (T[i, j, k+1] - T[i, j, k-1]) / (2.0f0 * dz)
+        elseif has_zp
+            (T[i, j, k+1] - tc) / dz
+        elseif has_zm
+            (tc - T[i, j, k-1]) / dz
+        else
+            0.0f0
+        end
+    end
+
+    # 2. Sample at centroids nudged slightly inward along -normal so we hit interior voxels
+    #    (avoids Inf32 exterior cells during nearest/trilinear lookup)
+    n_tris = length(centroids)
+    tri_T = zeros(Float32, n_tris)
+    tri_flow_dirs = Vector{SVector{3, Float32}}(undef, n_tris)
+    inward_nudge = 0.6f0 * min(dx, dy, dz)
+
+    for t in 1:n_tris
+        p = SVector{3, Float32}(centroids[t]) - inward_nudge * normals[t]
+
+        # Continuous voxel index (voxel centers are at min_pt + (i - 0.5) * dx)
+        fi = clamp((p[1] - min_pt[1]) / dx + 0.5f0, 1.0f0, Float32(nx))
+        fj = clamp((p[2] - min_pt[2]) / dy + 0.5f0, 1.0f0, Float32(ny))
+        fk = clamp((p[3] - min_pt[3]) / dz + 0.5f0, 1.0f0, Float32(nz))
+
+        # Trilinear interpolation over valid interior corners of the 2x2x2 cell
+        i0 = clamp(floor(Int, fi), 1, nx - 1); wi = fi - i0
+        j0 = clamp(floor(Int, fj), 1, ny - 1); wj = fj - j0
+        k0 = clamp(floor(Int, fk), 1, nz - 1); wk = fk - k0
+
+        w_sum = 0.0f0
+        t_acc = 0.0f0
+        g_acc = SVector(0.0f0, 0.0f0, 0.0f0)
+
+        for dk in 0:1, dj in 0:1, di in 0:1
+            ii, jj, kk = i0 + di, j0 + dj, k0 + dk
+            (voxel_grid[ii, jj, kk] && isfinite(T[ii, jj, kk])) || continue
+
+            w = (di == 0 ? 1.0f0 - wi : wi) *
+                (dj == 0 ? 1.0f0 - wj : wj) *
+                (dk == 0 ? 1.0f0 - wk : wk)
+
+            w_sum += w
+            t_acc += w * T[ii, jj, kk]
+            g_acc += w * SVector(gx[ii, jj, kk], gy[ii, jj, kk], gz[ii, jj, kk])
+        end
+
+        if w_sum > 1f-6
+            tri_T[t] = t_acc / w_sum
+            g_vec = g_acc / w_sum
+            # Project onto triangle tangent plane so surface arrows stay strictly on the surface
+            g_tan = g_vec - dot(g_vec, normals[t]) * normals[t]
+            gn = norm(g_tan)
+            tri_flow_dirs[t] = gn > 1f-9 ? (g_tan / gn) : SVector(0.0f0, 0.0f0, 0.0f0)
+        else
+            # Fallback to nearest valid interior voxel if nudged point fell outside
+            ii, jj, kk = round(Int, fi), round(Int, fj), round(Int, fk)
+            tri_T[t] = T[ii, jj, kk]
+            g_vec = SVector(gx[ii, jj, kk], gy[ii, jj, kk], gz[ii, jj, kk])
+            g_tan = g_vec - dot(g_vec, normals[t]) * normals[t]
+            gn = norm(g_tan)
+            tri_flow_dirs[t] = gn > 1f-9 ? (g_tan / gn) : SVector(0.0f0, 0.0f0, 0.0f0)
+        end
+    end
+
+    return tri_T, tri_flow_dirs
+end
+
 
 function vizualize_tfield(meshdata, node_thicknesses)
 
