@@ -9,10 +9,10 @@ using a ray-casting parity count (even/odd rule) across the Z-axis.
 function voxelize_mesh(meshdata; res = 100)
     bvh, points = meshdata.tlas, meshdata.mesh.position
     # 1. Compute bounding box of the mesh
-    min_bound = minimum(points)
-    max_bound = maximum(points)
+    bbox = GeometryBasics.Rect3(meshdata.mesh)
+    min_bound, max_bound = extrema(bbox)
     span = max_bound - min_bound
-    
+    @info "span", span
     # Add a small padding around the part
     padding = span * 0.05
     min_pt = min_bound - padding
@@ -20,7 +20,7 @@ function voxelize_mesh(meshdata; res = 100)
     span = max_pt - min_pt
     
     max_span = max(span[1], max(span[2], span[3]))
-    dx = dy = dz = max_span / res
+    dx = dy = dz = max_span / res #uniform voxelsize
     res_x = ceil(Int, span[1] / dx)
     res_y = ceil(Int, span[2] / dx)
     res_z = ceil(Int, span[3] / dx)
@@ -85,37 +85,97 @@ end
 
 Computes the Euclidean Distance Transform and scales it to get wall-to-wall thickness.
 """
-function compute_thickness_field_edt(voxel_grid, voxel_spacing)
+function compute_thickness_field_edt(voxeldata)
+    voxel_grid, voxel_spacing = voxeldata.grid, voxeldata.stepsize
     # 1. Convert boolean grid to binary indicator array format expected by DistanceTransforms.jl
-    binary_arr = boolean_indicator(voxel_grid)
+    binary_arr = BitArray(voxel_grid)
     
     # 2. Compute Euclidean Distance Transform (EDT)
     # This gives the distance from each interior voxel to the nearest background (0) voxel
-    edt_result = transform(binary_arr)
+    DT = DistanceTransforms.Felzenszwalb()
+    edt_result = transform(binary_arr, DT)
     
     # Extract the distance data array
-    distance_field = edt_result.data
+    distance_field = edt_result 
     
     # 3. Local thickness is twice the distance to the nearest wall, scaled by voxel dimensions
     # Assuming roughly isotropic spacing or scaling appropriately:
-    avg_spacing = mean(voxel_spacing)
-    thickness_field = 2.0f0 .* distance_field .* avg_spacing
+    # avg_spacing = sum(voxel_spacing) / length(voxel_spacing)
+    # @info "avg spacing", avg_spacing
+    # thickness_field = 2.0f0 .* distance_field .* avg_spacing
     
-    return thickness_field
+    return compute_local_thickness(distance_field, voxel_spacing)
 end
 
+"""
+    compute_local_thickness(edt_field, voxel_spacing)
 
+Computes true local thickness (Hildebrand-Rüegsegger) by propagating 
+medial-axis sphere radii outward to the boundaries.
+"""
+function compute_local_thickness(edt_field, voxel_spacing)
+    h_avg = sum(voxel_spacing) / length(voxel_spacing)
+    radii = edt_field .* h_avg
+    thickness = radii .* 2.0f0
+    
+    nx, ny, nz = size(radii)
+    
+    # Iterate over interior voxels that sit on or near the medial ridge
+    for k in 2:nz-1, j in 2:ny-1, i in 2:nx-1
+        r = radii[i, j, k]
+        r <= h_avg && continue
+        
+        # Check if (i,j,k) is a local maximum in at least one axis (medial ridge)
+        is_ridge = (r >= radii[i-1, j, k] && r >= radii[i+1, j, k]) ||
+                   (r >= radii[i, j-1, k] && r >= radii[i, j+1, k]) ||
+                   (r >= radii[i, j, k-1] && r >= radii[i, j, k+1])
+        is_ridge || continue
+        
+        # Stamp the sphere of diameter 2r onto all interior voxels within radius r
+        rad_vox = ceil(Int, r / h_avg)
+        r_sq = r^2
+        d = 2.0f0 * r
+        
+        for dk in -rad_vox:rad_vox
+            kk = k + dk
+            (1 <= kk <= nz) || continue
+            for dj in -rad_vox:rad_vox
+                jj = j + dj
+                (1 <= jj <= ny) || continue
+                for di in -rad_vox:rad_vox
+                    ii = i + di
+                    (1 <= ii <= nx) || continue
+                    
+                    # Only propagate to solid interior voxels
+                    edt_field[ii, jj, kk] > 0 || continue
+                    
+                    dist_sq = (di * voxel_spacing[1])^2 + 
+                              (dj * voxel_spacing[2])^2 + 
+                              (dk * voxel_spacing[3])^2
+                              
+                    if dist_sq <= r_sq && d > thickness[ii, jj, kk]
+                        thickness[ii, jj, kk] = d
+                    end
+                end
+            end
+        end
+    end
+    
+    return thickness
+end
 
 """
     map_thickness_to_nodes(thickness_field, voxel_spacing, min_pt, nodes)
 
 Interpolates the 3D voxel thickness grid onto the Gmsh surface mesh nodes.
 """
-function map_thickness_to_nodes(thickness_field, voxel_spacing, min_pt, nodes)
-    dx, dy, dz = voxel_spacing
-    
+function map_thickness_to_nodes(thickness_field, meshdata, voxeldata)
+    dx, dy, dz = voxeldata.stepsize
+    nodes = meshdata.mesh.position
+
     # 1. Define the coordinate axes of the 3D voxel grid in physical space
     nx, ny, nz = size(thickness_field)
+    min_pt = voxeldata.corner
     x_range = range(min_pt[1], step=dx, length=nx)
     y_range = range(min_pt[2], step=dy, length=ny)
     z_range = range(min_pt[3], step=dz, length=nz)
@@ -129,17 +189,54 @@ function map_thickness_to_nodes(thickness_field, voxel_spacing, min_pt, nodes)
     extrapolated_sitp = extrapolate(sitp, 0.0f0) 
     
     # 3. Query thickness for every node in the surface mesh
-    num_nodes = size(nodes, 2)
+    num_nodes = length(nodes)
     node_thicknesses = zeros(Float32, num_nodes)
     
     for i in 1:num_nodes
-        x = nodes[1, i]
-        y = nodes[2, i]
-        z = nodes[3, i]
+        point = nodes[i]
         
         # Evaluate interpolated thickness at node coordinate
-        node_thicknesses[i] = extrapolated_sitp(x, y, z)
+        node_thicknesses[i] = extrapolated_sitp(point...)
     end
     
     return node_thicknesses
+end
+
+
+
+
+
+
+
+function vizualize_tfield(meshdata, node_thicknesses)
+
+
+    fig = Figure()
+    ax = Axis3(fig[1,1])
+    mesh!(ax, meshdata.mesh, color = node_thicknesses)
+    wireframe!(ax, meshdata.mesh, color = :black, alpha = 0.5)
+    climits = extrema(node_thicknesses)
+    Colorbar(fig[1,2], limits = climits, tellheight= false)
+    fig
+end
+
+
+function run_example(;
+                    target_element_size = 1.0,
+                    res = 100)
+
+    fn_step = joinpath(pkgdir(@__MODULE__), "assets", "plate_with_ribs.step")
+    data = load_step_mesh_as_surface(fn_step; target_element_size)
+    meshdata = build_scene_bvh(data)
+    voxeldata = voxelize_mesh(meshdata; res)
+    tfield = compute_thickness_field_edt(voxeldata)
+    nthick = map_thickness_to_nodes(tfield, meshdata, voxeldata)
+    fig = vizualize_tfield(meshdata, nthick)
+
+    return (;fn_step, 
+            data, 
+            meshdata, 
+            voxeldata, 
+            nthick, 
+            fig)
 end
