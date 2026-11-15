@@ -6,9 +6,6 @@
 Computes in-plane flux divergence κ = ∇_s ⋅ û + (û ⋅ ∇_s h)/h and detects weld-line 
 triangles where opposing Eikonal wavefronts collide.
 """
-using StaticArrays
-using LinearAlgebra
-
 function compute_divergence_and_weldlines(
     centroids::AbstractVector{<:StaticVector{3, T1}},
     normals::AbstractVector{<:StaticVector{3, T2}},
@@ -101,17 +98,21 @@ Computes the 3D second-order Fiber Orientation Tensor (3x3 SMatrix) across `n_la
 through-thickness points ζ ∈ [-1, 1] and the thickness-averaged FOT per triangle.
 """
 function reconstruct_fot_layers(
-    centroids::Vector{Point3f},
-    normals::Vector{SVector{3, Float32}},
-    thicknesses::Vector{Float32},
-    tri_flow_dirs::Vector{SVector{3, Float32}},
-    neighbors::Vector{Vector{Int}};
-    n_layers::Int = 11,
-    core_exponent::Float32 = 2.0f0,
-    fountain_skin_frac::Float32 = 0.08f0,
-    div_scale::Float32 = 5.0f0
-)
+    centroids::AbstractVector{<:StaticVector{3, T1}},
+    normals::AbstractVector{<:StaticVector{3, T2}},
+    thicknesses::AbstractVector{T3},
+    tri_flow_dirs::AbstractVector{<:StaticVector{3, T4}},
+    neighbors::AbstractVector{<:AbstractVector{<:Integer}};
+    n_layers::Integer = 11,
+    core_exponent::Real = 2.0,
+    fountain_skin_frac::Real = 0.08,
+    div_scale::Real = 5.0
+) where {T1<:Real, T2<:Real, T3<:Real, T4<:Real}
+
+    T = float(promote_type(T1, T2, T3, T4))
+
     n_tris = length(centroids)
+
     divergence, is_weldline = compute_divergence_and_weldlines(
         centroids, normals, thicknesses, tri_flow_dirs, neighbors
     )
@@ -155,10 +156,11 @@ function reconstruct_fot_layers(
     ]
 
     # Normalized through-thickness coordinates ζ ∈ [-1, 1]
-    zetas = n_layers == 1 ? [0.0f0] : collect(range(-1.0f0, 1.0f0, length = n_layers))
+    
+    zetas = n_layers <=1 ? [zero(T)] : collect(range(T(-1), T(1), length = n_layers))
 
-    fot_layers = Matrix{SMatrix{3, 3, Float32, 9}}(undef, n_tris, n_layers)
-    fot_avg    = Vector{SMatrix{3, 3, Float32, 9}}(undef, n_tris)
+    fot_layers = Matrix{SMatrix{3, 3, T, 9}}(undef, n_tris, n_layers)
+    fot_avg    = Vector{SMatrix{3, 3, T, 9}}(undef, n_tris)
 
     for i in 1:n_tris
         n_hat = normals[i]

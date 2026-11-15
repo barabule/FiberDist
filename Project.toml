@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["barabule <werner.zanzinger@gmail.com>"]
 
 [deps]
+DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
 DistanceTransforms = "71182807-4d06-4237-8dd0-bdafe4d097e2"
 GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
 GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
@@ -16,6 +17,7 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [compat]
+DataStructures = "0.19.6"
 DistanceTransforms = "0.2.0"
 GLMakie = "0.13.17"
 GeometryBasics = "0.5.13"
