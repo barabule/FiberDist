@@ -15,8 +15,6 @@ using DataStructures
 include("typedefs.jl")
 include("meshgen.jl")
 include("voxelize.jl")
-include("eikonal.jl")
-include("fot_estimator.jl")
 
 
 
