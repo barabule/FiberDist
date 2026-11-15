@@ -6,84 +6,87 @@
 Computes in-plane flux divergence κ = ∇_s ⋅ û + (û ⋅ ∇_s h)/h and detects weld-line 
 triangles where opposing Eikonal wavefronts collide.
 """
+using StaticArrays
+using LinearAlgebra
+
 function compute_divergence_and_weldlines(
-    centroids::Vector{Point3f},
-    normals::Vector{SVector{3, Float32}},
-    thicknesses::Vector{Float32},
-    tri_flow_dirs::Vector{SVector{3, Float32}},
-    neighbors::Vector{Vector{Int}}
-)
+    centroids::AbstractVector{<:StaticVector{3, T1}},
+    normals::AbstractVector{<:StaticVector{3, T2}},
+    thicknesses::AbstractVector{T3},
+    tri_flow_dirs::AbstractVector{<:StaticVector{3, T4}},
+    neighbors::AbstractVector{<:AbstractVector{<:Integer}}
+) where {T1<:Real, T2<:Real, T3<:Real, T4<:Real}
+
+    T = float(promote_type(T1, T2, T3, T4))
+    Vec3 = SVector{3, T}
+    Mat3 = SMatrix{3, 3, T, 9}
+
     n_tris = length(centroids)
-    divergence = zeros(Float32, n_tris)
+    divergence = zeros(T, n_tris)
     is_weldline = falses(n_tris)
+
+    min_h    = T(0.1)
+    eps_norm = T(1e-6)
+    eps_det  = T(1e-12)
 
     for i in 1:n_tris
         nbrs = neighbors[i]
-        u_i = tri_flow_dirs[i]
-        if isempty(nbrs) || norm(u_i) < 1f-6
+        u_i = Vec3(tri_flow_dirs[i])
+        if isempty(nbrs) || norm(u_i) < eps_norm
             continue
         end
 
-        c_i = SVector{3, Float32}(centroids[i])
-        n_i = normals[i]
-        h_i = max(thicknesses[i], 0.1f0)
+        c_i = Vec3(centroids[i])
+        n_i = Vec3(normals[i])
+        h_i = max(T(thicknesses[i]), min_h)
 
-        # Least-squares tangential gradient of û and h over dual-graph neighbors
-        # Solve min Σ || (Δx_tan) * J - Δu_tan ||^2
-        M = @SMatrix zeros(Float32, 3, 3)
-        rhs_u = @SMatrix zeros(Float32, 3, 3)
-        rhs_h = SVector(0.0f0, 0.0f0, 0.0f0)
-        min_dot = 1.0f0
+        M = zero(Mat3)
+        rhs_u = zero(Mat3)
+        rhs_h = zero(Vec3)
+        min_dot = one(T)
 
         for j in nbrs
-            u_j = tri_flow_dirs[j]
-            norm(u_j) < 1f-6 && continue
+            u_j = Vec3(tri_flow_dirs[j])
+            norm(u_j) < eps_norm && continue
 
-            # Check for colliding wavefronts (opposing flow directions)
             d_ij = dot(u_i, u_j)
             if d_ij < min_dot
                 min_dot = d_ij
             end
 
-            dx = SVector{3, Float32}(centroids[j]) - c_i
-            # Project edge vector onto tangent plane of triangle i
+            dx = Vec3(centroids[j]) - c_i
             dx_tan = dx - dot(dx, n_i) * n_i
             dist_sq = dot(dx_tan, dx_tan)
-            dist_sq > 1f-12 || continue
+            dist_sq > eps_det || continue
 
-            w = 1.0f0 / dist_sq
+            w = inv(dist_sq)
             M += w * (dx_tan * dx_tan')
 
-            # Parallel-transport / project u_j onto tangent plane of triangle i
             u_j_tan = u_j - dot(u_j, n_i) * n_i
             un = norm(u_j_tan)
-            u_j_tan = un > 1f-6 ? (u_j_tan / un) : u_i
+            u_j_tan = un > eps_norm ? (u_j_tan / un) : u_i
 
             rhs_u += w * (dx_tan * (u_j_tan - u_i)')
-            rhs_h += w * dx_tan * (max(thicknesses[j], 0.1f0) - h_i)
+            rhs_h += w * dx_tan * (max(T(thicknesses[j]), min_h) - h_i)
         end
 
-        # Flag weld line if opposing fronts collide across shared edge
-        if min_dot < -0.25f0
+        if min_dot < T(-0.25)
             is_weldline[i] = true
         end
 
-        # Regularized pseudo-inverse in the 2D tangent plane (adding n_i * n_i' makes M full-rank 3x3)
         M_reg = M + (n_i * n_i')
-        if abs(det(M_reg)) > 1f-12
+        if abs(det(M_reg)) > eps_det
             invM = inv(M_reg)
-            grad_u = invM * rhs_u          # 3x3 tangential Jacobian ∂u_β / ∂x_α
-            grad_h = invM * rhs_h          # 3x1 tangential thickness gradient ∇_s h
-
-            # Surface divergence tr(grad_u) + (u_i ⋅ ∇_s h) / h_i
-            div_u = tr(grad_u)
-            div_h = dot(u_i, grad_h) / h_i
-            divergence[i] = div_u + div_h
+            grad_u = invM * rhs_u
+            grad_h = invM * rhs_h
+            divergence[i] = tr(grad_u) + dot(u_i, grad_h) / h_i
         end
     end
 
     return divergence, is_weldline
 end
+
+
 
 """
     reconstruct_fot_layers(

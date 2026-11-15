@@ -27,7 +27,7 @@ function load_step_mesh_as_surface(filepath::String;
     tri_node_tags = elem_node_tags[findfirst(elem_types .== 2)]
     elements = reshape(tri_node_tags, 3, :)
     
-    return (;nodes, elements)
+    return (;nodes, elements) |> build_scene_bvh
 end
 
 # 2. Build Raycore BVH Acceleration Structure from Mesh
@@ -40,8 +40,8 @@ function build_scene_bvh(data)
         i1, i2, i3 = elements[1, i], elements[2, i], elements[3, i]
         GeometryBasics.TriangleFace(i1, i2, i3)
     end
-    @info eltype(triangles)
-    @info eltype(triangles) <:GeometryBasics.AbstractFace
+    # @info eltype(triangles)
+    # @info eltype(triangles) <:GeometryBasics.AbstractFace
     # Build Raycore Top-Level Acceleration Structure (TLAS / BVH)
     mesh = normal_mesh(points, triangles)
     # tlas = Raycore.TLAS(KernelAbstractions.CPU()) 
