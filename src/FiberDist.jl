@@ -54,10 +54,10 @@ function run_example(;res = 100,
     #             markersize= markersize)
 
     interior_flow_dirs = stats.flow_dirs[isfinite.(fill_time)]
-    arrows3d!(ax, interior_points, interior_flow_dirs, color = :black, lengthscale = lengthscale)
+    arrows3d!(ax, interior_points, interior_flow_dirs, color = (:black, 0.5), lengthscale = lengthscale)
 
-    # scatter!(ax, mask_points(stats.masks.weld_lines, voxeldata.voxel_spacing, voxeldata.corner), color = :red, markersize = 6)
-    # scatter!(ax, mask_points(stats.masks.air_traps,  voxeldata.voxel_spacing, voxeldata.corner), color = :gold, markersize = 10)
+    scatter!(ax, mask_points(stats.masks.weld_lines, voxeldata.voxel_spacing, voxeldata.corner), color = :red, markersize = 6)
+    scatter!(ax, mask_points(stats.masks.air_traps,  voxeldata.voxel_spacing, voxeldata.corner), color = :gold, markersize = 10)
 
     fig
 end
