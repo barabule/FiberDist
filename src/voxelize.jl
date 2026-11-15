@@ -97,90 +97,6 @@ function voxelize_mesh(
     return VoxelData{T}(grid, voxel_spacing, corner)
 end
 
-# """
-#     compute_thickness_field_edt(voxel_grid, voxel_spacing)
-
-# Computes the Euclidean Distance Transform and scales it to get wall-to-wall thickness.
-# """
-# function compute_thickness_field_edt(voxeldata::VoxelData)
-#     voxel_grid, voxel_spacing = voxeldata.grid, voxeldata.voxel_spacing
-#     # 1. Convert boolean grid to binary indicator array format expected by DistanceTransforms.jl
-#     binary_arr = BitArray(voxel_grid)
-    
-#     # 2. Compute Euclidean Distance Transform (EDT)
-#     # This gives the distance from each interior voxel to the nearest background (0) voxel
-#     DT = DistanceTransforms.Felzenszwalb()
-#     edt_result = transform(binary_arr, DT)
-    
-#     # Extract the distance data array
-#     distance_field = edt_result 
-    
-#     # 3. Local thickness is twice the distance to the nearest wall, scaled by voxel dimensions
-#     # Assuming roughly isotropic spacing or scaling appropriately:
-#     # avg_spacing = sum(voxel_spacing) / length(voxel_spacing)
-#     # @info "avg spacing", avg_spacing
-#     # thickness_field = 2.0f0 .* distance_field .* avg_spacing
-    
-#     return compute_local_thickness(distance_field, voxel_spacing)
-# end
-
-# """
-#     compute_local_thickness(edt_field, voxel_spacing)
-
-# Computes true local thickness (Hildebrand-Rüegsegger) by propagating 
-# medial-axis sphere radii outward to the boundaries.
-# """
-# function compute_local_thickness(edt_field, voxel_spacing)
-#     h_avg = sum(voxel_spacing) / length(voxel_spacing)
-#     radii = edt_field .* h_avg
-#     thickness = radii .* 2.0f0
-    
-#     nx, ny, nz = size(radii)
-    
-#     # Iterate over interior voxels that sit on or near the medial ridge
-#     for k in 2:nz-1, j in 2:ny-1, i in 2:nx-1
-#         r = radii[i, j, k]
-#         r <= h_avg && continue
-        
-#         # Check if (i,j,k) is a local maximum in at least one axis (medial ridge)
-#         is_ridge = (r >= radii[i-1, j, k] && r >= radii[i+1, j, k]) ||
-#                    (r >= radii[i, j-1, k] && r >= radii[i, j+1, k]) ||
-#                    (r >= radii[i, j, k-1] && r >= radii[i, j, k+1])
-#         is_ridge || continue
-        
-#         # Stamp the sphere of diameter 2r onto all interior voxels within radius r
-#         rad_vox = ceil(Int, r / h_avg)
-#         r_sq = r^2
-#         d = 2.0f0 * r
-        
-#         for dk in -rad_vox:rad_vox
-#             kk = k + dk
-#             (1 <= kk <= nz) || continue
-#             for dj in -rad_vox:rad_vox
-#                 jj = j + dj
-#                 (1 <= jj <= ny) || continue
-#                 for di in -rad_vox:rad_vox
-#                     ii = i + di
-#                     (1 <= ii <= nx) || continue
-                    
-#                     # Only propagate to solid interior voxels
-#                     edt_field[ii, jj, kk] > 0 || continue
-                    
-#                     dist_sq = (di * voxel_spacing[1])^2 + 
-#                               (dj * voxel_spacing[2])^2 + 
-#                               (dk * voxel_spacing[3])^2
-                              
-#                     if dist_sq <= r_sq && d > thickness[ii, jj, kk]
-#                         thickness[ii, jj, kk] = d
-#                     end
-#                 end
-#             end
-#         end
-#     end
-    
-#     return thickness
-# end
-
 
 
 """
@@ -781,7 +697,7 @@ directly on the 3D voxel grid.
 function analyze_eikonal_field(
     fill_time::AbstractArray{T, 3}, #from eikonal
     voxeldata::VoxelData, #from voxelize
-    tfield::TField #from compute_squared_thickness_u16
+    tfield::TField, #from compute_squared_thickness_u16
     ;
     weld_dot_thresh::Real = -0.3,
     meld_dot_thresh::Real = 0.4,
@@ -795,7 +711,7 @@ function analyze_eikonal_field(
     voxel_grid = voxeldata.grid
     voxel_spacing = voxeldata.voxel_spacing    
 
-    thick_r_sq, r_sq = tfield
+    thick_r_sq, r_sq = tfield.thick_r_sq, tfield.r_sq
 
     nx, ny, nz = size(voxel_grid)
     dx, dy, dz = T(voxel_spacing[1]), T(voxel_spacing[2]), T(voxel_spacing[3])
@@ -1028,6 +944,9 @@ function mask_points(mask::BitArray{3}, spacing, corner)
     end
     return pts
 end
+
+
+
 
 # # Plot weld lines (red) and air traps (yellow) over a semi-transparent part mesh
 # mesh!(ax, meshdata.mesh, color = (:lightgray, 0.25), transparency = true)
