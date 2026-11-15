@@ -23,9 +23,9 @@ function voxelize_mesh(
 
     orig_span = max_bound - min_bound
     pad_vec   = orig_span .* T(padding)
-    min_pt    = min_bound - pad_vec
+    corner    = min_bound - pad_vec
     max_pt    = max_bound + pad_vec
-    span      = max_pt - min_pt
+    span      = max_pt - corner
 
     max_span = maximum(span)
     dx = max_span / T(res) # uniform cubic voxel size
@@ -38,7 +38,7 @@ function voxelize_mesh(
 
     voxel_grid = BitArray{3}(undef, res_x, res_y, res_z)
     fill!(voxel_grid, false)
-    z_start = min_pt[3] - dx
+    z_start = corner[3] - dx
     ray_dir = SVector{3, T}(zero(T), zero(T), one(T))
     eps_step = dx * T(1e-3)
 
@@ -51,10 +51,10 @@ function voxelize_mesh(
         hits = T[] # reused per thread to avoid allocations
 
         for j in 1:res_y
-            y = min_pt[2] + (T(j) - T(0.5)) * dy
+            y = corner[2] + (T(j) - T(0.5)) * dy
 
             for i in i_start:i_end
-                x = min_pt[1] + (T(i) - T(0.5)) * dx
+                x = corner[1] + (T(i) - T(0.5)) * dx
                 empty!(hits)
 
                 curr_z = z_start
@@ -77,9 +77,9 @@ function voxelize_mesh(
                         z_enter = hits[m]
                         z_exit  = hits[m + 1]
 
-                        # Voxel center is at min_pt[3] + (k - 0.5) * dz
-                        k_min = clamp(ceil(Int,  (z_enter - min_pt[3]) / dz + T(0.5)), 1, res_z)
-                        k_max = clamp(floor(Int, (z_exit  - min_pt[3]) / dz + T(0.5)), 1, res_z)
+                        # Voxel center is at corner[3] + (k - 0.5) * dz
+                        k_min = clamp(ceil(Int,  (z_enter - corner[3]) / dz + T(0.5)), 1, res_z)
+                        k_max = clamp(floor(Int, (z_exit  - corner[3]) / dz + T(0.5)), 1, res_z)
 
                         for k in k_min:k_max
                             @inbounds voxel_grid[i, j, k] = true
@@ -90,526 +90,97 @@ function voxelize_mesh(
         end
     end
 
-    return (; grid = voxel_grid, voxel_spacing = (dx, dy, dz), corner = min_pt)
+    # return (; grid = voxel_grid, voxel_spacing = (dx, dy, dz), corner = corner)
+    grid = voxel_grid
+    voxel_spacing = (dx, dy, dz)
+    corner = corner
+    return VoxelData{T}(grid, voxel_spacing, corner)
 end
 
-"""
-    compute_thickness_field_edt(voxel_grid, voxel_spacing)
+# """
+#     compute_thickness_field_edt(voxel_grid, voxel_spacing)
 
-Computes the Euclidean Distance Transform and scales it to get wall-to-wall thickness.
-"""
-function compute_thickness_field_edt(voxeldata)
-    voxel_grid, voxel_spacing = voxeldata.grid, voxeldata.voxel_spacing
-    # 1. Convert boolean grid to binary indicator array format expected by DistanceTransforms.jl
-    binary_arr = BitArray(voxel_grid)
+# Computes the Euclidean Distance Transform and scales it to get wall-to-wall thickness.
+# """
+# function compute_thickness_field_edt(voxeldata::VoxelData)
+#     voxel_grid, voxel_spacing = voxeldata.grid, voxeldata.voxel_spacing
+#     # 1. Convert boolean grid to binary indicator array format expected by DistanceTransforms.jl
+#     binary_arr = BitArray(voxel_grid)
     
-    # 2. Compute Euclidean Distance Transform (EDT)
-    # This gives the distance from each interior voxel to the nearest background (0) voxel
-    DT = DistanceTransforms.Felzenszwalb()
-    edt_result = transform(binary_arr, DT)
+#     # 2. Compute Euclidean Distance Transform (EDT)
+#     # This gives the distance from each interior voxel to the nearest background (0) voxel
+#     DT = DistanceTransforms.Felzenszwalb()
+#     edt_result = transform(binary_arr, DT)
     
-    # Extract the distance data array
-    distance_field = edt_result 
+#     # Extract the distance data array
+#     distance_field = edt_result 
     
-    # 3. Local thickness is twice the distance to the nearest wall, scaled by voxel dimensions
-    # Assuming roughly isotropic spacing or scaling appropriately:
-    # avg_spacing = sum(voxel_spacing) / length(voxel_spacing)
-    # @info "avg spacing", avg_spacing
-    # thickness_field = 2.0f0 .* distance_field .* avg_spacing
+#     # 3. Local thickness is twice the distance to the nearest wall, scaled by voxel dimensions
+#     # Assuming roughly isotropic spacing or scaling appropriately:
+#     # avg_spacing = sum(voxel_spacing) / length(voxel_spacing)
+#     # @info "avg spacing", avg_spacing
+#     # thickness_field = 2.0f0 .* distance_field .* avg_spacing
     
-    return compute_local_thickness(distance_field, voxel_spacing)
-end
+#     return compute_local_thickness(distance_field, voxel_spacing)
+# end
 
-"""
-    compute_local_thickness(edt_field, voxel_spacing)
+# """
+#     compute_local_thickness(edt_field, voxel_spacing)
 
-Computes true local thickness (Hildebrand-Rüegsegger) by propagating 
-medial-axis sphere radii outward to the boundaries.
-"""
-function compute_local_thickness(edt_field, voxel_spacing)
-    h_avg = sum(voxel_spacing) / length(voxel_spacing)
-    radii = edt_field .* h_avg
-    thickness = radii .* 2.0f0
+# Computes true local thickness (Hildebrand-Rüegsegger) by propagating 
+# medial-axis sphere radii outward to the boundaries.
+# """
+# function compute_local_thickness(edt_field, voxel_spacing)
+#     h_avg = sum(voxel_spacing) / length(voxel_spacing)
+#     radii = edt_field .* h_avg
+#     thickness = radii .* 2.0f0
     
-    nx, ny, nz = size(radii)
+#     nx, ny, nz = size(radii)
     
-    # Iterate over interior voxels that sit on or near the medial ridge
-    for k in 2:nz-1, j in 2:ny-1, i in 2:nx-1
-        r = radii[i, j, k]
-        r <= h_avg && continue
+#     # Iterate over interior voxels that sit on or near the medial ridge
+#     for k in 2:nz-1, j in 2:ny-1, i in 2:nx-1
+#         r = radii[i, j, k]
+#         r <= h_avg && continue
         
-        # Check if (i,j,k) is a local maximum in at least one axis (medial ridge)
-        is_ridge = (r >= radii[i-1, j, k] && r >= radii[i+1, j, k]) ||
-                   (r >= radii[i, j-1, k] && r >= radii[i, j+1, k]) ||
-                   (r >= radii[i, j, k-1] && r >= radii[i, j, k+1])
-        is_ridge || continue
+#         # Check if (i,j,k) is a local maximum in at least one axis (medial ridge)
+#         is_ridge = (r >= radii[i-1, j, k] && r >= radii[i+1, j, k]) ||
+#                    (r >= radii[i, j-1, k] && r >= radii[i, j+1, k]) ||
+#                    (r >= radii[i, j, k-1] && r >= radii[i, j, k+1])
+#         is_ridge || continue
         
-        # Stamp the sphere of diameter 2r onto all interior voxels within radius r
-        rad_vox = ceil(Int, r / h_avg)
-        r_sq = r^2
-        d = 2.0f0 * r
+#         # Stamp the sphere of diameter 2r onto all interior voxels within radius r
+#         rad_vox = ceil(Int, r / h_avg)
+#         r_sq = r^2
+#         d = 2.0f0 * r
         
-        for dk in -rad_vox:rad_vox
-            kk = k + dk
-            (1 <= kk <= nz) || continue
-            for dj in -rad_vox:rad_vox
-                jj = j + dj
-                (1 <= jj <= ny) || continue
-                for di in -rad_vox:rad_vox
-                    ii = i + di
-                    (1 <= ii <= nx) || continue
+#         for dk in -rad_vox:rad_vox
+#             kk = k + dk
+#             (1 <= kk <= nz) || continue
+#             for dj in -rad_vox:rad_vox
+#                 jj = j + dj
+#                 (1 <= jj <= ny) || continue
+#                 for di in -rad_vox:rad_vox
+#                     ii = i + di
+#                     (1 <= ii <= nx) || continue
                     
-                    # Only propagate to solid interior voxels
-                    edt_field[ii, jj, kk] > 0 || continue
+#                     # Only propagate to solid interior voxels
+#                     edt_field[ii, jj, kk] > 0 || continue
                     
-                    dist_sq = (di * voxel_spacing[1])^2 + 
-                              (dj * voxel_spacing[2])^2 + 
-                              (dk * voxel_spacing[3])^2
+#                     dist_sq = (di * voxel_spacing[1])^2 + 
+#                               (dj * voxel_spacing[2])^2 + 
+#                               (dk * voxel_spacing[3])^2
                               
-                    if dist_sq <= r_sq && d > thickness[ii, jj, kk]
-                        thickness[ii, jj, kk] = d
-                    end
-                end
-            end
-        end
-    end
+#                     if dist_sq <= r_sq && d > thickness[ii, jj, kk]
+#                         thickness[ii, jj, kk] = d
+#                     end
+#                 end
+#             end
+#         end
+#     end
     
-    return thickness
-end
+#     return thickness
+# end
 
-"""
-    map_thickness_to_nodes(thickness_field, voxel_spacing, min_pt, nodes)
-
-Interpolates the 3D voxel thickness grid onto the Gmsh surface mesh nodes.
-"""
-function map_thickness_to_nodes(thickness_field, meshdata, voxeldata)
-    dx, dy, dz = voxeldata.voxel_spacing
-    nodes = meshdata.mesh.position
-
-    # 1. Define the coordinate axes of the 3D voxel grid in physical space
-    nx, ny, nz = size(thickness_field)
-    min_pt = voxeldata.corner
-    x_range = range(min_pt[1], step=dx, length=nx)
-    y_range = range(min_pt[2], step=dy, length=ny)
-    z_range = range(min_pt[3], step=dz, length=nz)
-    
-    # 2. Build a b-spline linear interpolator over the grid
-    # Interpolations.jl expects (x, y, z) axes matching dimensions 1, 2, 3
-    itp = interpolate(thickness_field, BSpline(Linear()))
-    sitp = scale(itp, x_range, y_range, z_range)
-    
-    # Optional: Handle out-of-bounds nodes gracefully (e.g., clamp or set to NaN/zero)
-    extrapolated_sitp = extrapolate(sitp, 0.0f0) 
-    
-    # 3. Query thickness for every node in the surface mesh
-    num_nodes = length(nodes)
-    node_thicknesses = zeros(T, num_nodes)
-    
-    for i in 1:num_nodes
-        point = nodes[i]
-        
-        # Evaluate interpolated thickness at node coordinate
-        node_thicknesses[i] = extrapolated_sitp(point...)
-    end
-    
-    return node_thicknesses
-end
-
-
-
-"""
-    cartesian_upwind_3d(T_arr, i, j, k, F, dx, dy, dz)
-
-Solves the exact 3D Cartesian upwind quadratic equation:
-  max((T - Tx)/dx, 0)^2 + max((T - Ty)/dy, 0)^2 + max((T - Tz)/dz, 0)^2 = 1 / F^2
-"""
-function cartesian_upwind_3d(
-    T_arr::Array{T, 3},
-    i::Int, j::Int, k::Int,
-    F::T,
-    dx::T, dy::T, dz::T
-) where {T<:AbstractFloat}
-    nx, ny, nz = size(T_arr)
-    inf_val = T(Inf)
-
-    tx = min(i > 1 ? T_arr[i-1, j, k] : inf_val, i < nx ? T_arr[i+1, j, k] : inf_val)
-    ty = min(j > 1 ? T_arr[i, j-1, k] : inf_val, j < ny ? T_arr[i, j+1, k] : inf_val)
-    tz = min(k > 1 ? T_arr[i, j, k-1] : inf_val, k < nz ? T_arr[i, j, k+1] : inf_val)
-
-    # Sort active upwind dimensions by arrival time: t1 <= t2 <= t3
-    d1 = (tx, dx)
-    d2 = (ty, dy)
-    d3 = (tz, dz)
-    if d1[1] > d2[1]; d1, d2 = d2, d1; end
-    if d2[1] > d3[1]; d2, d3 = d3, d2; end
-    if d1[1] > d2[1]; d1, d2 = d2, d1; end
-
-    invF = inv(F)
-    t1, h1 = d1
-    !isfinite(t1) && return inf_val
-
-    # 1D update
-    t_cand = t1 + h1 * invF
-
-    # 2D quadratic update
-    t2, h2 = d2
-    if isfinite(t2) && t2 < t_cand
-        a = inv(h1^2) + inv(h2^2)
-        b = -T(2) * (t1 / h1^2 + t2 / h2^2)
-        c = (t1^2 / h1^2) + (t2^2 / h2^2) - invF^2
-        disc = b^2 - T(4) * a * c
-        if disc >= zero(T)
-            t_cand = (-b + sqrt(disc)) / (T(2) * a)
-        end
-    end
-
-    # 3D quadratic update
-    t3, h3 = d3
-    if isfinite(t3) && t3 < t_cand
-        a = inv(h1^2) + inv(h2^2) + inv(h3^2)
-        b = -T(2) * (t1 / h1^2 + t2 / h2^2 + t3 / h3^2)
-        c = (t1^2 / h1^2) + (t2^2 / h2^2) + (t3^2 / h3^2) - invF^2
-        disc = b^2 - T(4) * a * c
-        if disc >= zero(T)
-            t_cand = (-b + sqrt(disc)) / (T(2) * a)
-        end
-    end
-
-    return t_cand
-end
-
-"""
-    solve_eikonal_voxel(
-    voxel_grid::AbstractArray{Bool, 3},
-    thick_r_sq::AbstractArray{UInt16, 3},
-    voxel_spacing::Union{NTuple{3, T1}, StaticVector{3, T1}},
-    min_pt::StaticVector{3, T2},
-    gates::AbstractVector{<:ValveGate};
-    min_thickness::Real = 0.1,
-    shift::Integer = 0
-) where {T1<:Real, T2<:Real}
-        voxel_grid, thick_r_sq, voxel_spacing, min_pt, gates;
-        min_thickness=0.1, shift=0
-    )
-
-Solves the 3D Eikonal equation |∇T| = 1/F directly on interior solid voxels using
-the `UInt16` squared-radius thickness volume `thick_r_sq`.
-
-Computes Hele-Shaw speed on the fly without `sqrt` or allocating a Float thickness array:
-    h² = 4 * (thick_r_sq << shift) * dx_mean²
-    F  = max(h², min_thickness²)
-"""
-function solve_eikonal_voxel(
-    voxel_grid::AbstractArray{Bool, 3}, #in-out
-    thick_r_sq::AbstractArray{UInt16, 3}, #squared local thickness in square voxels
-    voxel_spacing::Union{NTuple{3, T1}, StaticVector{3, T1}}, #actual voxel size
-    min_pt::StaticVector{3, T2}, #lower corner of domain
-    gates::AbstractVector{<:ValveGate}; 
-    min_thickness::Real = 0.1, #
-    shift::Integer = 0
-) where {T1<:Real, T2<:Real}
-
-    @assert size(voxel_grid) == size(thick_r_sq) "voxel_grid and thick_r_sq must have identical dimensions"
-
-    # Infer working floating-point precision from inputs
-    T_gate = isempty(gates) ? Float32 : eltype(gates[1].open_time)
-    T = float(promote_type(T1, T2, T_gate))
-
-    nx, ny, nz = size(voxel_grid)
-    dx, dy, dz = T(voxel_spacing[1]), T(voxel_spacing[2]), T(voxel_spacing[3])
-    ox, oy, oz = T(min_pt[1]), T(min_pt[2]), T(min_pt[3])
-
-    # Precompute constant physical scaling factor: 4 * 2^shift * dx_mean^2
-    dx_mean = (dx + dy + dz) / T(3)
-    speed_scale = T(4) * T(1 << shift) * (dx_mean * dx_mean)
-    min_F = T(min_thickness)^2
-
-    T_field = fill(T(Inf), nx, ny, nz)
-    accepted = falses(nx, ny, nz)
-    pq = PriorityQueue{CartesianIndex{3}, T}()
-
-    # Locate nearest interior solid voxel to each gate coordinate via O(1) direct index
-    # lookup followed by an expanding spherical/cubic shell search
-    function find_nearest_interior_voxel(pos)
-        px, py, pz = T(pos[1]), T(pos[2]), T(pos[3])
-
-        # Direct index mapping (voxel centers sit at origin + (idx - 0.5) * spacing)
-        i0 = clamp(round(Int, (px - ox) / dx + T(0.5)), 1, nx)
-        j0 = clamp(round(Int, (py - oy) / dy + T(0.5)), 1, ny)
-        k0 = clamp(round(Int, (pz - oz) / dz + T(0.5)), 1, nz)
-
-        # Fast-path: target voxel itself is inside the solid
-        @inbounds if voxel_grid[i0, j0, k0]
-            return CartesianIndex(i0, j0, k0)
-        end
-
-        # Expand outward in concentric shells r = 1, 2, ... up to a local search radius
-        max_shell = min(max(nx, ny, nz), 32)
-        best_idx = CartesianIndex(i0, j0, k0)
-        best_dist_sq = T(Inf)
-
-        @inbounds for r in 1:max_shell
-            i_min, i_max = max(1, i0 - r), min(nx, i0 + r)
-            j_min, j_max = max(1, j0 - r), min(ny, j0 + r)
-            k_min, k_max = max(1, k0 - r), min(nz, k0 + r)
-
-            for k in k_min:k_max, j in j_min:j_max, i in i_min:i_max
-                # Only inspect the outer shell surface (skip interior already checked in r-1)
-                (abs(i - i0) == r || abs(j - j0) == r || abs(k - k0) == r) || continue
-                voxel_grid[i, j, k] || continue
-
-                vx = ox + (T(i) - T(0.5)) * dx
-                vy = oy + (T(j) - T(0.5)) * dy
-                vz = oz + (T(k) - T(0.5)) * dz
-                d2 = (vx - px)^2 + (vy - py)^2 + (vz - pz)^2
-
-                if d2 < best_dist_sq
-                    best_dist_sq = d2
-                    best_idx = CartesianIndex(i, j, k)
-                end
-            end
-
-            # Once we find at least one hit in shell r, check one more shell (r + 1) to guarantee
-            # true Euclidean closest match across corners/anisotropic spacings, then return
-            if isfinite(best_dist_sq)
-                r_next = r + 1
-                if r_next <= max_shell
-                    for k in max(1, k0 - r_next):min(nz, k0 + r_next),
-                        j in max(1, j0 - r_next):min(ny, j0 + r_next),
-                        i in max(1, i0 - r_next):min(nx, i0 + r_next)
-                        (abs(i - i0) == r_next || abs(j - j0) == r_next || abs(k - k0) == r_next) || continue
-                        voxel_grid[i, j, k] || continue
-
-                        vx = ox + (T(i) - T(0.5)) * dx
-                        vy = oy + (T(j) - T(0.5)) * dy
-                        vz = oz + (T(k) - T(0.5)) * dz
-                        d2 = (vx - px)^2 + (vy - py)^2 + (vz - pz)^2
-                        if d2 < best_dist_sq
-                            best_dist_sq = d2
-                            best_idx = CartesianIndex(i, j, k)
-                        end
-                    end
-                end
-                return best_idx
-            end
-        end
-
-        # Fallback full-grid scan only if gate was placed > 32 voxels away from any solid
-        @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
-            voxel_grid[i, j, k] || continue
-            vx = ox + (T(i) - T(0.5)) * dx
-            vy = oy + (T(j) - T(0.5)) * dy
-            vz = oz + (T(k) - T(0.5)) * dz
-            d2 = (vx - px)^2 + (vy - py)^2 + (vz - pz)^2
-            if d2 < best_dist_sq
-                best_dist_sq = d2
-                best_idx = CartesianIndex(i, j, k)
-            end
-        end
-        return best_idx
-    end
-
-    # Seed gates (supports cascaded opening times t_open >= 0)
-    for gate in gates
-        t_open = T(gate.open_time)
-        @assert t_open >= zero(T) "Gate opening time must be >= 0"
-        idx = find_nearest_interior_voxel(gate.position)
-        if t_open < T_field[idx]
-            T_field[idx] = t_open
-            pq[idx] = t_open
-        end
-    end
-
-    offsets = (
-        CartesianIndex(-1, 0, 0), CartesianIndex(1, 0, 0),
-        CartesianIndex(0, -1, 0), CartesianIndex(0, 1, 0),
-        CartesianIndex(0, 0, -1), CartesianIndex(0, 0, 1)
-    )
-
-    @inbounds while !isempty(pq)
-        curr, _ = dequeue_pair!(pq)
-        accepted[curr] && continue
-        accepted[curr] = true
-
-        for off in offsets
-            nbr = curr + off
-            i, j, k = Tuple(nbr)
-            (1 <= i <= nx && 1 <= j <= ny && 1 <= k <= nz) || continue
-            (voxel_grid[i, j, k] && !accepted[i, j, k]) || continue
-
-            # On-the-fly Hele-Shaw speed directly from UInt16 squared voxel radius
-            F_local = max(T(thick_r_sq[i, j, k]) * speed_scale, min_F)
-            t_cand = cartesian_upwind_3d(T_field, i, j, k, F_local, dx, dy, dz)
-
-            if t_cand < T_field[i, j, k]
-                T_field[i, j, k] = t_cand
-                pq[nbr] = t_cand
-            end
-        end
-    end
-
-    return T_field
-end
-
-"""
-    project_voxel_eikonal_to_mesh(T, voxel_grid, voxel_spacing, min_pt, centroids, normals)
-
-Computes clean one-sided gradients on the interior voxel grid and projects
-arrival times and tangent flow direction vectors onto surface triangle centroids.
-"""
-function project_voxel_eikonal_to_mesh(
-    thickness_field::AbstractArray{T1, 3},
-    voxel_grid::AbstractArray{Bool, 3},
-    voxel_spacing::Union{NTuple{3, T2}, StaticVector{3, T2}},
-    min_pt::StaticVector{3, T3},
-    centroids::AbstractVector{<:StaticVector{3, T4}},
-    normals::AbstractVector{<:StaticVector{3, T5}}
-) where {T1<:Real, T2<:Real, T3<:Real, T4<:Real, T5<:Real}
-
-    T = float(promote_type(T1, T2, T3, T4, T5))
-    nx, ny, nz = size(T_field)
-    dx, dy, dz = T.(voxel_spacing)
-
-    # 1. Compute interior-only gradient field (gx, gy, gz) using valid neighbors
-    gx = zeros(T, nx, ny, nz)
-    gy = zeros(T, nx, ny, nz)
-    gz = zeros(T, nx, ny, nz)
-
-    for k in 1:nz, j in 1:ny, i in 1:nx
-        (voxel_grid[i, j, k] && isfinite(thickness_field[i, j, k])) || continue
-        tc = thickness_field[i, j, k]
-
-        # X derivative (central if both interior, one-sided at boundary)
-        has_xm = i > 1  && voxel_grid[i-1, j, k] && isfinite(thickness_field[i-1, j, k])
-        has_xp = i < nx && voxel_grid[i+1, j, k] && isfinite(thickness_field[i+1, j, k])
-        gx[i, j, k] = if has_xm && has_xp
-            (thickness_field[i+1, j, k] - thickness_field[i-1, j, k]) / (2.0f0 * dx)
-        elseif has_xp
-            (thickness_field[i+1, j, k] - tc) / dx
-        elseif has_xm
-            (tc - thickness_field[i-1, j, k]) / dx
-        else
-            0.0f0
-        end
-
-        # Y derivative
-        has_ym = j > 1  && voxel_grid[i, j-1, k] && isfinite(thickness_field[i, j-1, k])
-        has_yp = j < ny && voxel_grid[i, j+1, k] && isfinite(thickness_field[i, j+1, k])
-        gy[i, j, k] = if has_ym && has_yp
-            (thickness_field[i, j+1, k] - thickness_field[i, j-1, k]) / (2.0f0 * dy)
-        elseif has_yp
-            (thickness_field[i, j+1, k] - tc) / dy
-        elseif has_ym
-            (tc - thickness_field[i, j-1, k]) / dy
-        else
-            0.0f0
-        end
-
-        # Z derivative
-        has_zm = k > 1  && voxel_grid[i, j, k-1] && isfinite(thickness_field[i, j, k-1])
-        has_zp = k < nz && voxel_grid[i, j, k+1] && isfinite(thickness_field[i, j, k+1])
-        gz[i, j, k] = if has_zm && has_zp
-            (thickness_field[i, j, k+1] - thickness_field[i, j, k-1]) / (2.0f0 * dz)
-        elseif has_zp
-            (thickness_field[i, j, k+1] - tc) / dz
-        elseif has_zm
-            (tc - thickness_field[i, j, k-1]) / dz
-        else
-            0.0f0
-        end
-    end
-
-    # 2. Sample at centroids nudged slightly inward along -normal so we hit interior voxels
-    #    (avoids Inf32 exterior cells during nearest/trilinear lookup)
-    n_tris = length(centroids)
-    tri_T = zeros(T, n_tris)
-    tri_flow_dirs = Vector{SVector{3, T}}(undef, n_tris)
-    inward_nudge = 0.6f0 * min(dx, dy, dz)
-
-    for t in 1:n_tris
-        p = SVector{3, T}(centroids[t]) - inward_nudge * normals[t]
-
-        # Continuous voxel index (voxel centers are at min_pt + (i - 0.5) * dx)
-        fi = clamp((p[1] - min_pt[1]) / dx + 0.5f0, 1.0f0, T(nx))
-        fj = clamp((p[2] - min_pt[2]) / dy + 0.5f0, 1.0f0, T(ny))
-        fk = clamp((p[3] - min_pt[3]) / dz + 0.5f0, 1.0f0, T(nz))
-
-        # Trilinear interpolation over valid interior corners of the 2x2x2 cell
-        i0 = clamp(floor(Int, fi), 1, nx - 1); wi = fi - i0
-        j0 = clamp(floor(Int, fj), 1, ny - 1); wj = fj - j0
-        k0 = clamp(floor(Int, fk), 1, nz - 1); wk = fk - k0
-
-        w_sum = 0.0f0
-        t_acc = 0.0f0
-        g_acc = SVector(0.0f0, 0.0f0, 0.0f0)
-
-        for dk in 0:1, dj in 0:1, di in 0:1
-            ii, jj, kk = i0 + di, j0 + dj, k0 + dk
-            (voxel_grid[ii, jj, kk] && isfinite(thickness_field[ii, jj, kk])) || continue
-
-            w = (di == 0 ? 1.0f0 - wi : wi) *
-                (dj == 0 ? 1.0f0 - wj : wj) *
-                (dk == 0 ? 1.0f0 - wk : wk)
-
-            w_sum += w
-            t_acc += w * thickness_field[ii, jj, kk]
-            g_acc += w * SVector(gx[ii, jj, kk], gy[ii, jj, kk], gz[ii, jj, kk])
-        end
-
-        if w_sum > 1f-6
-            tri_thickness_field[t] = t_acc / w_sum
-            g_vec = g_acc / w_sum
-            # Project onto triangle tangent plane so surface arrows stay strictly on the surface
-            g_tan = g_vec - dot(g_vec, normals[t]) * normals[t]
-            gn = norm(g_tan)
-            tri_flow_dirs[t] = gn > 1f-9 ? (g_tan / gn) : SVector(0.0f0, 0.0f0, 0.0f0)
-        else
-            # Fallback to nearest valid interior voxel if nudged point fell outside
-            ii, jj, kk = round(Int, fi), round(Int, fj), round(Int, fk)
-            tri_thickness_field[t] = thickness_field[ii, jj, kk]
-            g_vec = SVector(gx[ii, jj, kk], gy[ii, jj, kk], gz[ii, jj, kk])
-            g_tan = g_vec - dot(g_vec, normals[t]) * normals[t]
-            gn = norm(g_tan)
-            tri_flow_dirs[t] = gn > 1f-9 ? (g_tan / gn) : SVector(0.0f0, 0.0f0, 0.0f0)
-        end
-    end
-
-    return tri_T, tri_flow_dirs
-end
-
-
-function vizualize_tfield(meshdata, node_thicknesses)
-
-
-    fig = Figure()
-    ax = Axis3(fig[1,1])
-    mesh!(ax, meshdata.mesh, color = node_thicknesses)
-    wireframe!(ax, meshdata.mesh, color = :black, alpha = 0.5)
-    climits = extrema(node_thicknesses)
-    Colorbar(fig[1,2], limits = climits, tellheight= false)
-    fig
-end
-
-
-function run_example(;
-                    target_element_size = 1.0,
-                    res = 100)
-
-    fn_step = joinpath(pkgdir(@__MODULE__), "assets", "plate_with_ribs.step")
-    data = load_step_mesh_as_surface(fn_step; target_element_size)
-    meshdata = build_scene_bvh(data)
-    voxeldata = voxelize_mesh(meshdata; res)
-    tfield = compute_thickness_field_edt(voxeldata)
-    nthick = map_thickness_to_nodes(tfield, meshdata, voxeldata)
-    fig = vizualize_tfield(meshdata, nthick)
-
-    return (;fn_step, 
-            data, 
-            meshdata, 
-            voxeldata, 
-            nthick, 
-            fig)
-end
 
 
 """
@@ -682,7 +253,8 @@ end
 Computes the exact 3D Euclidean Distance Transform and inscribed-sphere local thickness
 directly in squared voxel units (`UInt16`, 2 bytes/voxel) from a `BitArray{3}` mask.
 """
-function compute_squared_thickness_u16(voxel_grid::BitArray{3})
+function compute_squared_thickness_u16(voxeldata::VoxelData)
+    voxel_grid = voxeldata.grid
     nx, ny, nz = size(voxel_grid)
     INF_SQ = Int64(nx)^2 + Int64(ny)^2 + Int64(nz)^2 + Int64(1)
     MAX_U16 = Int64(typemax(UInt16))
@@ -785,8 +357,244 @@ function compute_squared_thickness_u16(voxel_grid::BitArray{3})
         end
     end
 
-    return (;thick_r_sq, r_sq)
+    # return (;thick_r_sq, r_sq)
+    return TField(thick_r_sq, r_sq)
 end
+
+
+"""
+    cartesian_upwind_3d(T_arr, i, j, k, F, dx, dy, dz)
+
+Solves the exact 3D Cartesian upwind quadratic equation:
+  max((T - Tx)/dx, 0)^2 + max((T - Ty)/dy, 0)^2 + max((T - Tz)/dz, 0)^2 = 1 / F^2
+"""
+function cartesian_upwind_3d(
+    T_arr::Array{T, 3},
+    i::Int, j::Int, k::Int,
+    F::T,
+    dx::T, dy::T, dz::T
+) where {T<:AbstractFloat}
+    nx, ny, nz = size(T_arr)
+    inf_val = T(Inf)
+
+    tx = min(i > 1 ? T_arr[i-1, j, k] : inf_val, i < nx ? T_arr[i+1, j, k] : inf_val)
+    ty = min(j > 1 ? T_arr[i, j-1, k] : inf_val, j < ny ? T_arr[i, j+1, k] : inf_val)
+    tz = min(k > 1 ? T_arr[i, j, k-1] : inf_val, k < nz ? T_arr[i, j, k+1] : inf_val)
+
+    # Sort active upwind dimensions by arrival time: t1 <= t2 <= t3
+    d1 = (tx, dx)
+    d2 = (ty, dy)
+    d3 = (tz, dz)
+    if d1[1] > d2[1]; d1, d2 = d2, d1; end
+    if d2[1] > d3[1]; d2, d3 = d3, d2; end
+    if d1[1] > d2[1]; d1, d2 = d2, d1; end
+
+    invF = inv(F)
+    t1, h1 = d1
+    !isfinite(t1) && return inf_val
+
+    # 1D update
+    t_cand = t1 + h1 * invF
+
+    # 2D quadratic update
+    t2, h2 = d2
+    if isfinite(t2) && t2 < t_cand
+        a = inv(h1^2) + inv(h2^2)
+        b = -T(2) * (t1 / h1^2 + t2 / h2^2)
+        c = (t1^2 / h1^2) + (t2^2 / h2^2) - invF^2
+        disc = b^2 - T(4) * a * c
+        if disc >= zero(T)
+            t_cand = (-b + sqrt(disc)) / (T(2) * a)
+        end
+    end
+
+    # 3D quadratic update
+    t3, h3 = d3
+    if isfinite(t3) && t3 < t_cand
+        a = inv(h1^2) + inv(h2^2) + inv(h3^2)
+        b = -T(2) * (t1 / h1^2 + t2 / h2^2 + t3 / h3^2)
+        c = (t1^2 / h1^2) + (t2^2 / h2^2) + (t3^2 / h3^2) - invF^2
+        disc = b^2 - T(4) * a * c
+        if disc >= zero(T)
+            t_cand = (-b + sqrt(disc)) / (T(2) * a)
+        end
+    end
+
+    return t_cand
+end
+
+"""
+    solve_eikonal_voxel(
+    voxeldata::VoxelData{T},
+    tfield::TField,
+    gates::AbstractVector{<:ValveGate}; 
+    min_thickness::Real = 0.1, #
+    shift::Integer = 0
+) where {T<:Real}
+
+Solves the 3D Eikonal equation |∇T| = 1/F directly on interior solid voxels using
+the `UInt16` squared-radius thickness volume `thick_r_sq`.
+
+Computes Hele-Shaw speed on the fly without `sqrt` or allocating a Float thickness array:
+    h² = 4 * (thick_r_sq << shift) * dx_mean²
+    F  = max(h², min_thickness²)
+"""
+function solve_eikonal_voxel(
+    voxeldata::VoxelData{T},
+    tfield::TField,
+    gates::AbstractVector{<:ValveGate}; 
+    min_thickness::Real = 0.1, #
+    shift::Integer = 0
+) where {T<:Real}
+
+
+    voxel_grid, voxel_spacing, corner = voxeldata.grid, voxeldata.voxel_spacing, voxeldata.corner
+    thick_r_sq = tfield.thick_r_sq
+
+    @assert size(voxel_grid) == size(thick_r_sq) "voxel_grid and thick_r_sq must have identical dimensions"
+
+    # Infer working floating-point precision from inputs
+    T_gate = isempty(gates) ? Float32 : eltype(gates[1].open_time)
+    
+
+    nx, ny, nz = size(voxel_grid)
+    dx, dy, dz = T(voxel_spacing[1]), T(voxel_spacing[2]), T(voxel_spacing[3])
+    ox, oy, oz = T(corner[1]), T(corner[2]), T(corner[3])
+
+    # Precompute constant physical scaling factor: 4 * 2^shift * dx_mean^2
+    dx_mean = (dx + dy + dz) / T(3)
+    speed_scale = T(4) * T(1 << shift) * (dx_mean * dx_mean)
+    min_F = T(min_thickness)^2
+
+    fill_time = fill(T(Inf), nx, ny, nz)
+    accepted = falses(nx, ny, nz)
+    pq = PriorityQueue{CartesianIndex{3}, T}()
+
+    # Locate nearest interior solid voxel to each gate coordinate via O(1) direct index
+    # lookup followed by an expanding spherical/cubic shell search
+    function find_nearest_interior_voxel(pos)
+        px, py, pz = T(pos[1]), T(pos[2]), T(pos[3])
+
+        # Direct index mapping (voxel centers sit at origin + (idx - 0.5) * spacing)
+        i0 = clamp(round(Int, (px - ox) / dx + T(0.5)), 1, nx)
+        j0 = clamp(round(Int, (py - oy) / dy + T(0.5)), 1, ny)
+        k0 = clamp(round(Int, (pz - oz) / dz + T(0.5)), 1, nz)
+
+        # Fast-path: target voxel itself is inside the solid
+        @inbounds if voxel_grid[i0, j0, k0]
+            return CartesianIndex(i0, j0, k0)
+        end
+
+        # Expand outward in concentric shells r = 1, 2, ... up to a local search radius
+        max_shell = min(max(nx, ny, nz), 32)
+        best_idx = CartesianIndex(i0, j0, k0)
+        best_dist_sq = T(Inf)
+
+        @inbounds for r in 1:max_shell
+            i_min, i_max = max(1, i0 - r), min(nx, i0 + r)
+            j_min, j_max = max(1, j0 - r), min(ny, j0 + r)
+            k_min, k_max = max(1, k0 - r), min(nz, k0 + r)
+
+            for k in k_min:k_max, j in j_min:j_max, i in i_min:i_max
+                # Only inspect the outer shell surface (skip interior already checked in r-1)
+                (abs(i - i0) == r || abs(j - j0) == r || abs(k - k0) == r) || continue
+                voxel_grid[i, j, k] || continue
+
+                vx = ox + (T(i) - T(0.5)) * dx
+                vy = oy + (T(j) - T(0.5)) * dy
+                vz = oz + (T(k) - T(0.5)) * dz
+                d2 = (vx - px)^2 + (vy - py)^2 + (vz - pz)^2
+
+                if d2 < best_dist_sq
+                    best_dist_sq = d2
+                    best_idx = CartesianIndex(i, j, k)
+                end
+            end
+
+            # Once we find at least one hit in shell r, check one more shell (r + 1) to guarantee
+            # true Euclidean closest match across corners/anisotropic spacings, then return
+            if isfinite(best_dist_sq)
+                r_next = r + 1
+                if r_next <= max_shell
+                    for k in max(1, k0 - r_next):min(nz, k0 + r_next),
+                        j in max(1, j0 - r_next):min(ny, j0 + r_next),
+                        i in max(1, i0 - r_next):min(nx, i0 + r_next)
+                        (abs(i - i0) == r_next || abs(j - j0) == r_next || abs(k - k0) == r_next) || continue
+                        voxel_grid[i, j, k] || continue
+
+                        vx = ox + (T(i) - T(0.5)) * dx
+                        vy = oy + (T(j) - T(0.5)) * dy
+                        vz = oz + (T(k) - T(0.5)) * dz
+                        d2 = (vx - px)^2 + (vy - py)^2 + (vz - pz)^2
+                        if d2 < best_dist_sq
+                            best_dist_sq = d2
+                            best_idx = CartesianIndex(i, j, k)
+                        end
+                    end
+                end
+                return best_idx
+            end
+        end
+
+        # Fallback full-grid scan only if gate was placed > 32 voxels away from any solid
+        @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
+            voxel_grid[i, j, k] || continue
+            vx = ox + (T(i) - T(0.5)) * dx
+            vy = oy + (T(j) - T(0.5)) * dy
+            vz = oz + (T(k) - T(0.5)) * dz
+            d2 = (vx - px)^2 + (vy - py)^2 + (vz - pz)^2
+            if d2 < best_dist_sq
+                best_dist_sq = d2
+                best_idx = CartesianIndex(i, j, k)
+            end
+        end
+        return best_idx
+    end
+
+    # Seed gates (supports cascaded opening times t_open >= 0)
+    for gate in gates
+        t_open = T(gate.open_time)
+        @assert t_open >= zero(T) "Gate opening time must be >= 0"
+        idx = find_nearest_interior_voxel(gate.position)
+        if t_open < fill_time[idx]
+            fill_time[idx] = t_open
+            pq[idx] = t_open
+        end
+    end
+
+    offsets = (
+        CartesianIndex(-1, 0, 0), CartesianIndex(1, 0, 0),
+        CartesianIndex(0, -1, 0), CartesianIndex(0, 1, 0),
+        CartesianIndex(0, 0, -1), CartesianIndex(0, 0, 1)
+    )
+
+    @inbounds while !isempty(pq)
+        curr, _ = dequeue_pair!(pq)
+        accepted[curr] && continue
+        accepted[curr] = true
+
+        for off in offsets
+            nbr = curr + off
+            i, j, k = Tuple(nbr)
+            (1 <= i <= nx && 1 <= j <= ny && 1 <= k <= nz) || continue
+            (voxel_grid[i, j, k] && !accepted[i, j, k]) || continue
+
+            # On-the-fly Hele-Shaw speed directly from UInt16 squared voxel radius
+            F_local = max(T(thick_r_sq[i, j, k]) * speed_scale, min_F)
+            t_cand = cartesian_upwind_3d(fill_time, i, j, k, F_local, dx, dy, dz)
+
+            if t_cand < fill_time[i, j, k]
+                fill_time[i, j, k] = t_cand
+                pq[nbr] = t_cand
+            end
+        end
+    end
+
+    return fill_time
+end
+
+
+
 
 # Physical wall thickness h at voxel (i, j, k):
 @inline get_thickness(thick_r_sq::Array{UInt16, 3}, i, j, k, dx::T) where {T<:AbstractFloat} =
@@ -812,8 +620,8 @@ or `nothing` if the ray misses the mesh or passes through without hitting a soli
 """
 function find_closest_interior_voxel(
     ray::Raycore.AbstractRay,
-    meshdata,
-    voxeldata;
+    meshdata::MeshData,
+    voxeldata::VoxelData;
     max_march_dist::Union{Nothing, Real} = nothing
 )
     bvh  = meshdata.tlas
@@ -950,30 +758,30 @@ function find_closest_interior_voxel(
 end
 
 
-using StaticArrays
-using LinearAlgebra
 
 """
     analyze_eikonal_field(
-        T_field, voxel_grid, thick_r_sq, voxel_spacing;
-        r_sq = nothing,
-        weld_dot_thresh = -0.3,
-        meld_dot_thresh = 0.4,
-        div_thresh = 0.05,
-        hesitation_quantile = 0.15,
-        core_exponent = 2.0,
-        div_scale = 5.0,
-        max_shear_tilt = 0.08
-    )
+    fill_time::AbstractArray{T, 3}, #from eikonal
+    voxeldata::VoxelData, #from voxelize
+    tfield::TField #from compute_squared_thickness_u16
+    ;
+    weld_dot_thresh::Real = -0.3,
+    meld_dot_thresh::Real = 0.4,
+    div_thresh::Real = 0.05,
+    hesitation_quantile::Real = 0.15,
+    core_exponent::Real = 2.0,
+    div_scale::Real = 5.0,
+    max_shear_tilt::Real = 0.08
+) where {T<:Real}
 
 Extracts diagnostic `BitArray{3}` masks, unit flow direction vectors `û = ∇T / |∇T|`,
 and the full 6-component symmetric Fiber Orientation Tensor `(a11, a22, a33, a12, a13, a23)`
 directly on the 3D voxel grid.
 """
 function analyze_eikonal_field(
-    T_field::AbstractArray{T, 3}, #from eikonal
-    voxeldata, #from voxelize
-    tfield #from compute_squared_thickness_u16
+    fill_time::AbstractArray{T, 3}, #from eikonal
+    voxeldata::VoxelData, #from voxelize
+    tfield::TField #from compute_squared_thickness_u16
     ;
     weld_dot_thresh::Real = -0.3,
     meld_dot_thresh::Real = 0.4,
@@ -997,26 +805,26 @@ function analyze_eikonal_field(
     front_speed = zeros(T, nx, ny, nz)
 
     @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
-        (voxel_grid[i, j, k] && isfinite(T_field[i, j, k])) || continue
-        tc = T(T_field[i, j, k])
+        (voxel_grid[i, j, k] && isfinite(fill_time[i, j, k])) || continue
+        tc = T(fill_time[i, j, k])
 
-        xm = i > 1  && voxel_grid[i-1, j, k] && isfinite(T_field[i-1, j, k])
-        xp = i < nx && voxel_grid[i+1, j, k] && isfinite(T_field[i+1, j, k])
-        gx = (xm && xp) ? (T(T_field[i+1, j, k]) - T(T_field[i-1, j, k])) / (T(2) * dx) :
-             xp         ? (T(T_field[i+1, j, k]) - tc) / dx :
-             xm         ? (tc - T(T_field[i-1, j, k])) / dx : zero(T)
+        xm = i > 1  && voxel_grid[i-1, j, k] && isfinite(fill_time[i-1, j, k])
+        xp = i < nx && voxel_grid[i+1, j, k] && isfinite(fill_time[i+1, j, k])
+        gx = (xm && xp) ? (T(fill_time[i+1, j, k]) - T(fill_time[i-1, j, k])) / (T(2) * dx) :
+             xp         ? (T(fill_time[i+1, j, k]) - tc) / dx :
+             xm         ? (tc - T(fill_time[i-1, j, k])) / dx : zero(T)
 
-        ym = j > 1  && voxel_grid[i, j-1, k] && isfinite(T_field[i, j-1, k])
-        yp = j < ny && voxel_grid[i, j+1, k] && isfinite(T_field[i, j+1, k])
-        gy = (ym && yp) ? (T(T_field[i, j+1, k]) - T(T_field[i, j-1, k])) / (T(2) * dy) :
-             yp         ? (T(T_field[i, j+1, k]) - tc) / dy :
-             ym         ? (tc - T(T_field[i, j-1, k])) / dy : zero(T)
+        ym = j > 1  && voxel_grid[i, j-1, k] && isfinite(fill_time[i, j-1, k])
+        yp = j < ny && voxel_grid[i, j+1, k] && isfinite(fill_time[i, j+1, k])
+        gy = (ym && yp) ? (T(fill_time[i, j+1, k]) - T(fill_time[i, j-1, k])) / (T(2) * dy) :
+             yp         ? (T(fill_time[i, j+1, k]) - tc) / dy :
+             ym         ? (tc - T(fill_time[i, j-1, k])) / dy : zero(T)
 
-        zm = k > 1  && voxel_grid[i, j, k-1] && isfinite(T_field[i, j, k-1])
-        zp = k < nz && voxel_grid[i, j, k+1] && isfinite(T_field[i, j, k+1])
-        gz = (zm && zp) ? (T(T_field[i, j, k+1]) - T(T_field[i, j, k-1])) / (T(2) * dz) :
-             zp         ? (T(T_field[i, j, k+1]) - tc) / dz :
-             zm         ? (tc - T(T_field[i, j, k-1])) / dz : zero(T)
+        zm = k > 1  && voxel_grid[i, j, k-1] && isfinite(fill_time[i, j, k-1])
+        zp = k < nz && voxel_grid[i, j, k+1] && isfinite(fill_time[i, j, k+1])
+        gz = (zm && zp) ? (T(fill_time[i, j, k+1]) - T(fill_time[i, j, k-1])) / (T(2) * dz) :
+             zp         ? (T(fill_time[i, j, k+1]) - tc) / dz :
+             zm         ? (tc - T(fill_time[i, j, k-1])) / dz : zero(T)
 
         g = SVector{3, T}(gx, gy, gz)
         gn = norm(g)
@@ -1060,9 +868,9 @@ function analyze_eikonal_field(
 
     # 3. Single-pass extraction of masks and full 6-component 3D FOT
     @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
-        (voxel_grid[i, j, k] && isfinite(T_field[i, j, k])) || continue
+        (voxel_grid[i, j, k] && isfinite(fill_time[i, j, k])) || continue
 
-        tc = T(T_field[i, j, k])
+        tc = T(fill_time[i, j, k])
         u_c = flow_dirs[i, j, k]
         has_flow = norm(u_c) > T(1e-6)
 
@@ -1073,10 +881,10 @@ function analyze_eikonal_field(
         for off in offsets
             ii, jj, kk = i + off[1], j + off[2], k + off[3]
             (1 <= ii <= nx && 1 <= jj <= ny && 1 <= kk <= nz) || continue
-            (voxel_grid[ii, jj, kk] && isfinite(T_field[ii, jj, kk])) || continue
+            (voxel_grid[ii, jj, kk] && isfinite(fill_time[ii, jj, kk])) || continue
 
             has_valid_nbr = true
-            if T(T_field[ii, jj, kk]) > tc
+            if T(fill_time[ii, jj, kk]) > tc
                 is_local_max = false
             end
 
