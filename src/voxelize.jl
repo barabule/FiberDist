@@ -785,7 +785,7 @@ function compute_squared_thickness_u16(voxel_grid::BitArray{3})
         end
     end
 
-    return thick_r_sq
+    return (;thick_r_sq, r_sq)
 end
 
 # Physical wall thickness h at voxel (i, j, k):
@@ -952,18 +952,17 @@ end
 
 """
     analyze_eikonal_field(
-    T_field::AbstractArray{T1, 3},
+    T_field::AbstractArray{T, 3},
     voxeldata,
-    thick_r_sq::AbstractArray{UInt16, 3}
+    t_field_data,
     ;
-    r_sq::Union{Nothing, AbstractArray{UInt16, 3}} = nothing,
     weld_dot_thresh::Real = -0.3,
     meld_dot_thresh::Real = 0.4,
     div_thresh::Real = 0.05,
     hesitation_quantile::Real = 0.15,
     core_exponent::Real = 2.0,
     div_scale::Real = 5.0
-) where {T1<:Real}
+) where {T<:Real}
 
 Extracts diagnostic `BitArray{3}` masks, unit flow direction vectors `û = ∇T / |∇T|`,
 and global Fiber Orientation Tensor components `(a11, a22, a33)` directly on the 3D voxel grid.
@@ -971,9 +970,8 @@ and global Fiber Orientation Tensor components `(a11, a22, a33)` directly on the
 function analyze_eikonal_field(
     T_field::AbstractArray{T, 3},
     voxeldata,
-    thick_r_sq::AbstractArray{UInt16, 3}
+    t_field_data,
     ;
-    r_sq::Union{Nothing, AbstractArray{UInt16, 3}} = nothing,
     weld_dot_thresh::Real = -0.3,
     meld_dot_thresh::Real = 0.4,
     div_thresh::Real = 0.05,
@@ -984,6 +982,8 @@ function analyze_eikonal_field(
 
     voxel_grid = voxeldata.grid
     voxel_spacing = voxeldata.voxel_spacing
+
+    thick_r_sq, r_sq = t_field_data
 
     
     nx, ny, nz = size(voxel_grid)
