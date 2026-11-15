@@ -11,11 +11,13 @@ using GLMakie
 using DistanceTransforms
 using Interpolations
 using DataStructures
+using Printf
+
 
 include("typedefs.jl")
 include("meshgen.jl")
 include("voxelize.jl")
-
+include("exporter.jl")
 
 
 end # module FiberDist
