@@ -62,13 +62,33 @@ function main()
     lengthscale = Observable(0.5)
     arrows3d!(ax, interior_points, interior_flow_dirs, color = (:black, 0.5), lengthscale = lengthscale)
 
+    # # Plot weld lines (red) and air traps (yellow) over a semi-transparent part mesh
+# mesh!(ax, meshdata.mesh, color = (:lightgray, 0.25), transparency = true)
+# scatter!(ax, mask_points(res.masks.weld_lines, voxeldata.stepsize, voxeldata.corner), color = :red, markersize = 6)
+# scatter!(ax, mask_points(res.masks.air_traps,  voxeldata.stepsize, voxeldata.corner), color = :gold, markersize = 10)
 
+    cb_weld = Checkbox(fig, checked = false)
+    cb_air = Checkbox(fig, checked = false)
+
+    weld_lines = lift(voxeldata, stats) do vd, st
+        mask_points(st.masks.weld_lines, vd.voxel_spacing, vd.corner)
+    end
+
+    scatter!(ax, weld_lines, color = :red, markersize = 6, alpha = @lift($(cb_weld.checked) ? 1.0 : 0.0))
+    
+    air_traps = lift(voxeldata, stats) do vd, st
+        mask_points(st.masks.air_traps, vd.voxel_spacing, vd.corner)
+    end
+    
+    scatter!(ax, air_traps, color = :gold, markersize = 10, alpha = @lift($(cb_air.checked) ? 1.0 : 0.0))
 
     tb_res = Textbox(fig, placeholder = "100", validator = Int)
     tb_lenscale = Textbox(fig, placeholder=  "0.5", validator = Float64)
     tb_t2 = Textbox(fig, placeholder = "0.0", validator = Float64)
+
     BOTTOMBAR[1,1] = vgrid!(
         hgrid!(Label(fig, "Resolution"), tb_res, Label(fig, "Lengthscale"), tb_lenscale, Label(fig, "Gate 2 time"), tb_t2),
+        hgrid!(Label(fig, "Draw Weld Lines"), cb_weld, Label(fig, "Draw Air Traps"), cb_air),
     )
 
     on(tb_res.stored_string) do s   

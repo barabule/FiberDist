@@ -948,7 +948,3 @@ end
 
 
 
-# # Plot weld lines (red) and air traps (yellow) over a semi-transparent part mesh
-# mesh!(ax, meshdata.mesh, color = (:lightgray, 0.25), transparency = true)
-# scatter!(ax, mask_points(res.masks.weld_lines, voxeldata.stepsize, voxeldata.corner), color = :red, markersize = 6)
-# scatter!(ax, mask_points(res.masks.air_traps,  voxeldata.stepsize, voxeldata.corner), color = :gold, markersize = 10)
