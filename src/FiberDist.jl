@@ -19,7 +19,7 @@ include("meshgen.jl")
 include("voxelize.jl")
 include("exporter.jl")
 include("viz.jl")
-
+include("gui.jl")
 
 function run_example(;res = 100,
                     draw_arrows = false,
