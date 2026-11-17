@@ -386,9 +386,58 @@ function solve_eikonal_voxel(
     accepted = falses(nx, ny, nz)
     pq = PriorityQueue{CartesianIndex{3}, T}()
 
-    # Locate nearest interior solid voxel to each gate coordinate via O(1) direct index
-    # lookup followed by an expanding spherical/cubic shell search
-    function find_nearest_interior_voxel(pos)
+    
+    
+
+    # Seed gates (supports cascaded opening times t_open >= 0)
+    for gate in gates
+        t_open = T(gate.open_time)
+        @assert t_open >= zero(T) "Gate opening time must be >= 0"
+        idx = find_nearest_interior_voxel(gate.position, voxeldata)
+        if t_open < fill_time[idx]
+            fill_time[idx] = t_open
+            pq[idx] = t_open
+        end
+    end
+
+    offsets = (
+        CartesianIndex(-1, 0, 0), CartesianIndex(1, 0, 0),
+        CartesianIndex(0, -1, 0), CartesianIndex(0, 1, 0),
+        CartesianIndex(0, 0, -1), CartesianIndex(0, 0, 1)
+    )
+
+    @inbounds while !isempty(pq)
+        curr, _ = dequeue_pair!(pq)
+        accepted[curr] && continue
+        accepted[curr] = true
+
+        for off in offsets
+            nbr = curr + off
+            i, j, k = Tuple(nbr)
+            (1 <= i <= nx && 1 <= j <= ny && 1 <= k <= nz) || continue
+            (voxel_grid[i, j, k] && !accepted[i, j, k]) || continue
+
+            # On-the-fly Hele-Shaw speed directly from UInt16 squared voxel radius
+            F_local = max(T(thick_r_sq[i, j, k]) * speed_scale, min_F)
+            t_cand = cartesian_upwind_3d(fill_time, i, j, k, F_local, dx, dy, dz)
+
+            if t_cand < fill_time[i, j, k]
+                fill_time[i, j, k] = t_cand
+                pq[nbr] = t_cand
+            end
+        end
+    end
+
+    return fill_time
+end
+
+# Locate nearest interior solid voxel to each gate coordinate via O(1) direct index
+# lookup followed by an expanding spherical/cubic shell search
+function find_nearest_interior_voxel(pos, voxeldata::VoxelData{T}) where T
+        ox, oy, oz = voxeldata.corner
+        voxel_grid = voxeldata.grid
+        dx, dy, dz = voxeldata.voxel_spacing
+        nx, ny, nz = size(voxel_grid)
         px, py, pz = T(pos[1]), T(pos[2]), T(pos[3])
 
         # Direct index mapping (voxel centers sit at origin + (idx - 0.5) * spacing)
@@ -466,50 +515,6 @@ function solve_eikonal_voxel(
         end
         return best_idx
     end
-
-    # Seed gates (supports cascaded opening times t_open >= 0)
-    for gate in gates
-        t_open = T(gate.open_time)
-        @assert t_open >= zero(T) "Gate opening time must be >= 0"
-        idx = find_nearest_interior_voxel(gate.position)
-        if t_open < fill_time[idx]
-            fill_time[idx] = t_open
-            pq[idx] = t_open
-        end
-    end
-
-    offsets = (
-        CartesianIndex(-1, 0, 0), CartesianIndex(1, 0, 0),
-        CartesianIndex(0, -1, 0), CartesianIndex(0, 1, 0),
-        CartesianIndex(0, 0, -1), CartesianIndex(0, 0, 1)
-    )
-
-    @inbounds while !isempty(pq)
-        curr, _ = dequeue_pair!(pq)
-        accepted[curr] && continue
-        accepted[curr] = true
-
-        for off in offsets
-            nbr = curr + off
-            i, j, k = Tuple(nbr)
-            (1 <= i <= nx && 1 <= j <= ny && 1 <= k <= nz) || continue
-            (voxel_grid[i, j, k] && !accepted[i, j, k]) || continue
-
-            # On-the-fly Hele-Shaw speed directly from UInt16 squared voxel radius
-            F_local = max(T(thick_r_sq[i, j, k]) * speed_scale, min_F)
-            t_cand = cartesian_upwind_3d(fill_time, i, j, k, F_local, dx, dy, dz)
-
-            if t_cand < fill_time[i, j, k]
-                fill_time[i, j, k] = t_cand
-                pq[nbr] = t_cand
-            end
-        end
-    end
-
-    return fill_time
-end
-
-
 
 
 # Physical wall thickness h at voxel (i, j, k):

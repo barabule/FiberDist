@@ -2,8 +2,8 @@ function main()
 
     fig = Figure()
 
-    ax = Axis3(fig[1,1], aspect = :data)
-
+    ax = Axis3(fig[1,1], aspect = :data, protrusions = 0)
+    
 
     BOTTOMBAR = GridLayout(fig[2,1], tellwidth = false)
 
@@ -50,7 +50,33 @@ function main()
     end
 
 
-    mesh!(ax, meshdata[].mesh, color = (:lightgray, 0.25), transparency = true)
+    vcolor = lift(fill_time, voxeldata, meshdata) do ft, vd, md
+        project_voxel_to_mesh_vertex(md, vd, ft)
+    end
+
+    num_color_bands = Observable(16)
+    cmap_name = Observable(:turbo)
+
+    # mesh!(ax, meshdata[].mesh, color = (:lightgray, 0.25), transparency = true)
+    mplot = mesh!(ax, meshdata[].mesh, color = vcolor, colormap = @lift(cgrad($cmap_name, $num_color_bands, categorical = true)))
+
+    cb = Colorbar(fig[1,1], 
+                    mplot;
+                halign = :right, 
+                valign = :top,
+                tellwidth = false,
+                tellheight = false,
+                label = "Fill Time",
+                height = 280,
+                width = 18,
+                tickformat = "{:.3f}",
+                ticklabelsize = 12,
+                labelsize = 13,
+                labelpadding = 6,
+                ticklabelpad = 6,
+                )
+                
+
 
     # scatter!(ax, interior_points, color = :black)
 
@@ -60,7 +86,7 @@ function main()
 
 
     lengthscale = Observable(0.5)
-    arrows3d!(ax, interior_points, interior_flow_dirs, color = (:black, 0.5), lengthscale = lengthscale)
+    # arrows3d!(ax, interior_points, interior_flow_dirs, color = (:black, 0.5), lengthscale = lengthscale)
 
     # # Plot weld lines (red) and air traps (yellow) over a semi-transparent part mesh
 # mesh!(ax, meshdata.mesh, color = (:lightgray, 0.25), transparency = true)
