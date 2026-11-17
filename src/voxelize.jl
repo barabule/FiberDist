@@ -434,87 +434,87 @@ end
 # Locate nearest interior solid voxel to each gate coordinate via O(1) direct index
 # lookup followed by an expanding spherical/cubic shell search
 function find_nearest_interior_voxel(pos, voxeldata::VoxelData{T}) where T
-        ox, oy, oz = voxeldata.corner
-        voxel_grid = voxeldata.grid
-        dx, dy, dz = voxeldata.voxel_spacing
-        nx, ny, nz = size(voxel_grid)
-        px, py, pz = T(pos[1]), T(pos[2]), T(pos[3])
+    ox, oy, oz = voxeldata.corner
+    voxel_grid = voxeldata.grid
+    dx, dy, dz = voxeldata.voxel_spacing
+    nx, ny, nz = size(voxel_grid)
+    px, py, pz = T(pos[1]), T(pos[2]), T(pos[3])
 
-        # Direct index mapping (voxel centers sit at origin + (idx - 0.5) * spacing)
-        i0 = clamp(round(Int, (px - ox) / dx + T(0.5)), 1, nx)
-        j0 = clamp(round(Int, (py - oy) / dy + T(0.5)), 1, ny)
-        k0 = clamp(round(Int, (pz - oz) / dz + T(0.5)), 1, nz)
+    # Direct index mapping (voxel centers sit at origin + (idx - 0.5) * spacing)
+    i0 = clamp(round(Int, (px - ox) / dx + T(0.5)), 1, nx)
+    j0 = clamp(round(Int, (py - oy) / dy + T(0.5)), 1, ny)
+    k0 = clamp(round(Int, (pz - oz) / dz + T(0.5)), 1, nz)
 
-        # Fast-path: target voxel itself is inside the solid
-        @inbounds if voxel_grid[i0, j0, k0]
-            return CartesianIndex(i0, j0, k0)
-        end
+    # Fast-path: target voxel itself is inside the solid
+    @inbounds if voxel_grid[i0, j0, k0]
+        return CartesianIndex(i0, j0, k0)
+    end
 
-        # Expand outward in concentric shells r = 1, 2, ... up to a local search radius
-        max_shell = min(max(nx, ny, nz), 32)
-        best_idx = CartesianIndex(i0, j0, k0)
-        best_dist_sq = T(Inf)
+    # Expand outward in concentric shells r = 1, 2, ... up to a local search radius
+    max_shell = min(max(nx, ny, nz), 32)
+    best_idx = CartesianIndex(i0, j0, k0)
+    best_dist_sq = T(Inf)
 
-        @inbounds for r in 1:max_shell
-            i_min, i_max = max(1, i0 - r), min(nx, i0 + r)
-            j_min, j_max = max(1, j0 - r), min(ny, j0 + r)
-            k_min, k_max = max(1, k0 - r), min(nz, k0 + r)
+    @inbounds for r in 1:max_shell
+        i_min, i_max = max(1, i0 - r), min(nx, i0 + r)
+        j_min, j_max = max(1, j0 - r), min(ny, j0 + r)
+        k_min, k_max = max(1, k0 - r), min(nz, k0 + r)
 
-            for k in k_min:k_max, j in j_min:j_max, i in i_min:i_max
-                # Only inspect the outer shell surface (skip interior already checked in r-1)
-                (abs(i - i0) == r || abs(j - j0) == r || abs(k - k0) == r) || continue
-                voxel_grid[i, j, k] || continue
-
-                vx = ox + (T(i) - T(0.5)) * dx
-                vy = oy + (T(j) - T(0.5)) * dy
-                vz = oz + (T(k) - T(0.5)) * dz
-                d2 = (vx - px)^2 + (vy - py)^2 + (vz - pz)^2
-
-                if d2 < best_dist_sq
-                    best_dist_sq = d2
-                    best_idx = CartesianIndex(i, j, k)
-                end
-            end
-
-            # Once we find at least one hit in shell r, check one more shell (r + 1) to guarantee
-            # true Euclidean closest match across corners/anisotropic spacings, then return
-            if isfinite(best_dist_sq)
-                r_next = r + 1
-                if r_next <= max_shell
-                    for k in max(1, k0 - r_next):min(nz, k0 + r_next),
-                        j in max(1, j0 - r_next):min(ny, j0 + r_next),
-                        i in max(1, i0 - r_next):min(nx, i0 + r_next)
-                        (abs(i - i0) == r_next || abs(j - j0) == r_next || abs(k - k0) == r_next) || continue
-                        voxel_grid[i, j, k] || continue
-
-                        vx = ox + (T(i) - T(0.5)) * dx
-                        vy = oy + (T(j) - T(0.5)) * dy
-                        vz = oz + (T(k) - T(0.5)) * dz
-                        d2 = (vx - px)^2 + (vy - py)^2 + (vz - pz)^2
-                        if d2 < best_dist_sq
-                            best_dist_sq = d2
-                            best_idx = CartesianIndex(i, j, k)
-                        end
-                    end
-                end
-                return best_idx
-            end
-        end
-
-        # Fallback full-grid scan only if gate was placed > 32 voxels away from any solid
-        @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
+        for k in k_min:k_max, j in j_min:j_max, i in i_min:i_max
+            # Only inspect the outer shell surface (skip interior already checked in r-1)
+            (abs(i - i0) == r || abs(j - j0) == r || abs(k - k0) == r) || continue
             voxel_grid[i, j, k] || continue
+
             vx = ox + (T(i) - T(0.5)) * dx
             vy = oy + (T(j) - T(0.5)) * dy
             vz = oz + (T(k) - T(0.5)) * dz
             d2 = (vx - px)^2 + (vy - py)^2 + (vz - pz)^2
+
             if d2 < best_dist_sq
                 best_dist_sq = d2
                 best_idx = CartesianIndex(i, j, k)
             end
         end
-        return best_idx
+
+        # Once we find at least one hit in shell r, check one more shell (r + 1) to guarantee
+        # true Euclidean closest match across corners/anisotropic spacings, then return
+        if isfinite(best_dist_sq)
+            r_next = r + 1
+            if r_next <= max_shell
+                for k in max(1, k0 - r_next):min(nz, k0 + r_next),
+                    j in max(1, j0 - r_next):min(ny, j0 + r_next),
+                    i in max(1, i0 - r_next):min(nx, i0 + r_next)
+                    (abs(i - i0) == r_next || abs(j - j0) == r_next || abs(k - k0) == r_next) || continue
+                    voxel_grid[i, j, k] || continue
+
+                    vx = ox + (T(i) - T(0.5)) * dx
+                    vy = oy + (T(j) - T(0.5)) * dy
+                    vz = oz + (T(k) - T(0.5)) * dz
+                    d2 = (vx - px)^2 + (vy - py)^2 + (vz - pz)^2
+                    if d2 < best_dist_sq
+                        best_dist_sq = d2
+                        best_idx = CartesianIndex(i, j, k)
+                    end
+                end
+            end
+            return best_idx
+        end
     end
+
+    # Fallback full-grid scan only if gate was placed > 32 voxels away from any solid
+    @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
+        voxel_grid[i, j, k] || continue
+        vx = ox + (T(i) - T(0.5)) * dx
+        vy = oy + (T(j) - T(0.5)) * dy
+        vz = oz + (T(k) - T(0.5)) * dz
+        d2 = (vx - px)^2 + (vy - py)^2 + (vz - pz)^2
+        if d2 < best_dist_sq
+            best_dist_sq = d2
+            best_idx = CartesianIndex(i, j, k)
+        end
+    end
+    return best_idx
+end
 
 
 # Physical wall thickness h at voxel (i, j, k):
