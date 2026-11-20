@@ -682,28 +682,29 @@ end
 
 """
     analyze_eikonal_field(
-    fill_time::AbstractArray{T, 3}, #from eikonal
-    voxeldata::VoxelData, #from voxelize
-    tfield::TField #from compute_squared_thickness_u16
-    ;
-    weld_dot_thresh::Real = -0.3,
-    meld_dot_thresh::Real = 0.4,
-    div_thresh::Real = 0.05,
-    hesitation_quantile::Real = 0.15,
-    core_exponent::Real = 2.0,
-    div_scale::Real = 5.0,
-    max_shear_tilt::Real = 0.08
-) where {T<:Real}
+        T_field, voxel_grid, thick_r_sq, voxel_spacing;
+        r_sq = nothing,
+        weld_dot_thresh = -0.3,
+        meld_dot_thresh = 0.4,
+        div_thresh = 0.05,
+        hesitation_quantile = 0.15,
+        core_exponent = 2.0,
+        div_scale = 5.0,
+        max_shear_tilt = 0.08
+    )
 
-Extracts diagnostic `BitArray{3}` masks, unit flow direction vectors `û = ∇T / |∇T|`,
-and the full 6-component symmetric Fiber Orientation Tensor `(a11, a22, a33, a12, a13, a23)`
-directly on the 3D voxel grid.
+Extracts sparse localized defect masks (`weld_lines`, `meld_lines`, `air_traps`) directly
+as `SparseVoxelMask` (`Vector{Int32}` linear indices) without intermediate `BitArray`
+allocations, dense flow-regime masks (`diverging_flow`, `converging_flow`, `hesitation`),
+unit flow directions `û = ∇T / |∇T|`, and the full 6-component symmetric Fiber Orientation
+Tensor `(a11, a22, a33, a12, a13, a23)`.
 """
 function analyze_eikonal_field(
-    fill_time::AbstractArray{T, 3}, #from eikonal
-    voxeldata::VoxelData, #from voxelize
-    tfield::TField, #from compute_squared_thickness_u16
-    ;
+    T_field::AbstractArray{T1, 3},
+    voxel_grid::AbstractArray{Bool, 3},
+    thick_r_sq::AbstractArray{UInt16, 3},
+    voxel_spacing::Union{NTuple{3, T2}, StaticVector{3, T2}};
+    r_sq::Union{Nothing, AbstractArray{UInt16, 3}} = nothing,
     weld_dot_thresh::Real = -0.3,
     meld_dot_thresh::Real = 0.4,
     div_thresh::Real = 0.05,
@@ -711,41 +712,41 @@ function analyze_eikonal_field(
     core_exponent::Real = 2.0,
     div_scale::Real = 5.0,
     max_shear_tilt::Real = 0.08
-) where {T<:Real}
+) where {T1<:Real, T2<:Real}
 
-    voxel_grid = voxeldata.grid
-    voxel_spacing = voxeldata.voxel_spacing    
+    T = float(promote_type(T1, T2))
+    dims = size(voxel_grid)
+    nx, ny, nz = dims
+    @assert prod(dims) <= typemax(Int32) "Grid voxel count exceeds Int32 indexing limit; use Int64 indices"
 
-    thick_r_sq, r_sq = tfield.thick_r_sq, tfield.r_sq
-
-    nx, ny, nz = size(voxel_grid)
     dx, dy, dz = T(voxel_spacing[1]), T(voxel_spacing[2]), T(voxel_spacing[3])
+    lin_inds = LinearIndices(dims)
 
     # 1. Compute interior-only 3D gradient ∇T and unit flow direction û
     flow_dirs = fill(zero(SVector{3, T}), nx, ny, nz)
     front_speed = zeros(T, nx, ny, nz)
 
     @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
-        (voxel_grid[i, j, k] && isfinite(fill_time[i, j, k])) || continue
-        tc = T(fill_time[i, j, k])
+        (voxel_grid[i, j, k] && isfinite(T_field[i, j, k])) || continue
+        tc = T(T_field[i, j, k])
 
-        xm = i > 1  && voxel_grid[i-1, j, k] && isfinite(fill_time[i-1, j, k])
-        xp = i < nx && voxel_grid[i+1, j, k] && isfinite(fill_time[i+1, j, k])
-        gx = (xm && xp) ? (T(fill_time[i+1, j, k]) - T(fill_time[i-1, j, k])) / (T(2) * dx) :
-             xp         ? (T(fill_time[i+1, j, k]) - tc) / dx :
-             xm         ? (tc - T(fill_time[i-1, j, k])) / dx : zero(T)
+        xm = i > 1  && voxel_grid[i-1, j, k] && isfinite(T_field[i-1, j, k])
+        xp = i < nx && voxel_grid[i+1, j, k] && isfinite(T_field[i+1, j, k])
+        gx = (xm && xp) ? (T(T_field[i+1, j, k]) - T(T_field[i-1, j, k])) / (T(2) * dx) :
+             xp         ? (T(T_field[i+1, j, k]) - tc) / dx :
+             xm         ? (tc - T(T_field[i-1, j, k])) / dx : zero(T)
 
-        ym = j > 1  && voxel_grid[i, j-1, k] && isfinite(fill_time[i, j-1, k])
-        yp = j < ny && voxel_grid[i, j+1, k] && isfinite(fill_time[i, j+1, k])
-        gy = (ym && yp) ? (T(fill_time[i, j+1, k]) - T(fill_time[i, j-1, k])) / (T(2) * dy) :
-             yp         ? (T(fill_time[i, j+1, k]) - tc) / dy :
-             ym         ? (tc - T(fill_time[i, j-1, k])) / dy : zero(T)
+        ym = j > 1  && voxel_grid[i, j-1, k] && isfinite(T_field[i, j-1, k])
+        yp = j < ny && voxel_grid[i, j+1, k] && isfinite(T_field[i, j+1, k])
+        gy = (ym && yp) ? (T(T_field[i, j+1, k]) - T(T_field[i, j-1, k])) / (T(2) * dy) :
+             yp         ? (T(T_field[i, j+1, k]) - tc) / dy :
+             ym         ? (tc - T(T_field[i, j-1, k])) / dy : zero(T)
 
-        zm = k > 1  && voxel_grid[i, j, k-1] && isfinite(fill_time[i, j, k-1])
-        zp = k < nz && voxel_grid[i, j, k+1] && isfinite(fill_time[i, j, k+1])
-        gz = (zm && zp) ? (T(fill_time[i, j, k+1]) - T(fill_time[i, j, k-1])) / (T(2) * dz) :
-             zp         ? (T(fill_time[i, j, k+1]) - tc) / dz :
-             zm         ? (tc - T(fill_time[i, j, k-1])) / dz : zero(T)
+        zm = k > 1  && voxel_grid[i, j, k-1] && isfinite(T_field[i, j, k-1])
+        zp = k < nz && voxel_grid[i, j, k+1] && isfinite(T_field[i, j, k+1])
+        gz = (zm && zp) ? (T(T_field[i, j, k+1]) - T(T_field[i, j, k-1])) / (T(2) * dz) :
+             zp         ? (T(T_field[i, j, k+1]) - tc) / dz :
+             zm         ? (tc - T(T_field[i, j, k-1])) / dz : zero(T)
 
         g = SVector{3, T}(gx, gy, gz)
         gn = norm(g)
@@ -759,14 +760,19 @@ function analyze_eikonal_field(
     speed_cutoff = isempty(valid_speeds) ? zero(T) :
         sort(valid_speeds)[max(1, round(Int, T(hesitation_quantile) * length(valid_speeds)))]
 
-    # 2. Allocate BitArray{3} diagnostic masks & all 6 FOT components
-    weld_lines      = BitArray{3}(undef, nx, ny, nz); fill!(weld_lines, false)
-    meld_lines      = BitArray{3}(undef, nx, ny, nz); fill!(meld_lines, false)
-    diverging_flow  = BitArray{3}(undef, nx, ny, nz); fill!(diverging_flow, false)
-    converging_flow = BitArray{3}(undef, nx, ny, nz); fill!(converging_flow, false)
-    air_traps       = BitArray{3}(undef, nx, ny, nz); fill!(air_traps, false)
-    hesitation      = BitArray{3}(undef, nx, ny, nz); fill!(hesitation, false)
+    # 2. Direct sparse index buffers for localized defects (zero intermediate BitArrays)
+    #    Iterating `for k in 1:nz, j in 1:ny, i in 1:nx` visits linear indices in strictly
+    #    ascending order, so `nz_inds` are guaranteed sorted upon completion.
+    weld_inds = Int32[]
+    meld_inds = Int32[]
+    trap_inds = Int32[]
 
+    # Dense BitArray{3} masks for broad flow regimes
+    diverging_flow  = falses(nx, ny, nz)
+    converging_flow = falses(nx, ny, nz)
+    hesitation      = falses(nx, ny, nz)
+
+    # Full 6-component symmetric Fiber Orientation Tensor
     a11 = zeros(T, nx, ny, nz)
     a22 = zeros(T, nx, ny, nz)
     a33 = zeros(T, nx, ny, nz)
@@ -787,11 +793,12 @@ function analyze_eikonal_field(
     d_scale  = T(div_scale)
     s_tilt   = T(max_shear_tilt)
 
-    # 3. Single-pass extraction of masks and full 6-component 3D FOT
+    # 3. Single-pass extraction of sparse defect indices, dense masks, and 6-component FOT
     @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
-        (voxel_grid[i, j, k] && isfinite(fill_time[i, j, k])) || continue
+        (voxel_grid[i, j, k] && isfinite(T_field[i, j, k])) || continue
 
-        tc = T(fill_time[i, j, k])
+        lin_idx = Int32(lin_inds[i, j, k])
+        tc = T(T_field[i, j, k])
         u_c = flow_dirs[i, j, k]
         has_flow = norm(u_c) > T(1e-6)
 
@@ -802,10 +809,10 @@ function analyze_eikonal_field(
         for off in offsets
             ii, jj, kk = i + off[1], j + off[2], k + off[3]
             (1 <= ii <= nx && 1 <= jj <= ny && 1 <= kk <= nz) || continue
-            (voxel_grid[ii, jj, kk] && isfinite(fill_time[ii, jj, kk])) || continue
+            (voxel_grid[ii, jj, kk] && isfinite(T_field[ii, jj, kk])) || continue
 
             has_valid_nbr = true
-            if T(fill_time[ii, jj, kk]) > tc
+            if T(T_field[ii, jj, kk]) > tc
                 is_local_max = false
             end
 
@@ -819,14 +826,16 @@ function analyze_eikonal_field(
         end
 
         if has_valid_nbr && is_local_max && tc > zero(T)
-            air_traps[i, j, k] = true
+            push!(trap_inds, lin_idx)
         end
 
+        is_weld = false
         if has_flow
             if min_dot < w_thresh
-                weld_lines[i, j, k] = true
+                push!(weld_inds, lin_idx)
+                is_weld = true
             elseif min_dot < m_thresh
-                meld_lines[i, j, k] = true
+                push!(meld_inds, lin_idx)
             end
         end
 
@@ -885,7 +894,7 @@ function analyze_eikonal_field(
         end
 
         # Local tensor components (λ_flow, λ_trans, λ_norm, λ_13)
-        if weld_lines[i, j, k]
+        if is_weld
             λ_flow, λ_trans, λ_norm, λ_13 = T(0.15), T(0.78), T(0.07), zero(T)
         else
             α_div = T(0.5) * (one(T) + tanh(div_u * d_scale))
@@ -899,12 +908,10 @@ function analyze_eikonal_field(
             λ_flow  = (one(T) - w_shear) * c_flow  + w_shear * s_flow
             λ_trans = (one(T) - w_shear) * c_trans + w_shear * s_trans
             λ_norm  = (one(T) - w_shear) * c_norm  + w_shear * s_norm
-            # Out-of-plane shear tilt peaks in the high-shear transition layer (ζ ≈ 0.7)
             λ_13    = s_tilt * T(4) * ζ * (one(T) - ζ) * w_shear
         end
 
         # Full symmetric tensor rotation: A_global = R * A_local * Rᵀ
-        # Diagonal terms:
         a11[i, j, k] = λ_flow * e1[1]^2 + λ_trans * e2[1]^2 + λ_norm * e3[1]^2 +
                        T(2) * λ_13 * e1[1] * e3[1]
         a22[i, j, k] = λ_flow * e1[2]^2 + λ_trans * e2[2]^2 + λ_norm * e3[2]^2 +
@@ -912,7 +919,6 @@ function analyze_eikonal_field(
         a33[i, j, k] = λ_flow * e1[3]^2 + λ_trans * e2[3]^2 + λ_norm * e3[3]^2 +
                        T(2) * λ_13 * e1[3] * e3[3]
 
-        # Off-diagonal shear terms:
         a12[i, j, k] = λ_flow * e1[1]*e1[2] + λ_trans * e2[1]*e2[2] + λ_norm * e3[1]*e3[2] +
                        λ_13 * (e1[1]*e3[2] + e3[1]*e1[2])
         a13[i, j, k] = λ_flow * e1[1]*e1[3] + λ_trans * e2[1]*e2[3] + λ_norm * e3[1]*e3[3] +
@@ -922,11 +928,11 @@ function analyze_eikonal_field(
     end
 
     masks = (;
-        weld_lines,
-        meld_lines,
+        weld_lines      = SparseVoxelMask(dims, weld_inds),
+        meld_lines      = SparseVoxelMask(dims, meld_inds),
+        air_traps       = SparseVoxelMask(dims, trap_inds),
         diverging_flow,
         converging_flow,
-        air_traps,
         hesitation
     )
 
@@ -934,6 +940,7 @@ function analyze_eikonal_field(
 
     return (; masks, flow_dirs, front_speed, fot)
 end
+
 
 
 # Helper to extract world coordinates of all `true` voxels in any BitArray{3} mask
