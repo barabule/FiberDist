@@ -49,16 +49,16 @@ end
 
 """
     project_voxel_to_mesh_triangles(
-        meshdata::MeshData,
-        voxeldata::VoxelData,
-        fill_time::AbstractArray{T1, 3},
-        thickness::ThicknessField;
-        adj::MeshAdjacency = build_mesh_adjacency(meshdata.mesh),
-        inward_offset_vox::Real = 0.75,
-        weld_dot_thresh::Real = -0.3,
-        meld_dot_thresh::Real = 0.4,
-        div_thresh::Real = 0.05
-    ) where {T1<:Real}
+    meshdata::MeshData,
+    voxeldata::VoxelData,
+    fill_time::AbstractArray{T1, 3},
+    thickness::ThicknessField;
+    inward_offset_vox::Real = 0.75,
+    weld_dot_thresh::Real = -0.3,
+    meld_dot_thresh::Real = 0.4,
+    div_thresh::Real = 0.05
+) where {T1<:Real}
+        
 
 Multi-threaded projection of Eikonal `fill_time`, tangent-projected unit flow directions `e1`,
 local physical wall thickness `h`, in-plane flow divergence `div_u`, and surface defect masks
@@ -70,7 +70,6 @@ function project_voxel_to_mesh_triangles(
     voxeldata::VoxelData,
     fill_time::AbstractArray{T1, 3},
     thickness::ThicknessField;
-    # adj::MeshAdjacency = build_mesh_adjacency(meshdata.mesh),
     inward_offset_vox::Real = 0.75,
     weld_dot_thresh::Real = -0.3,
     meld_dot_thresh::Real = 0.4,
