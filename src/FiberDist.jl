@@ -19,13 +19,13 @@ using Adapt
 
 include("typedefs.jl") #types
 
-include("import_mesh.jl") #stage I - load CAD, mesh and return meshdata struct
+include("import_mesh.jl") #stage I - load CAD, mesh and return MeshData struct
 
 include("voxelize.jl") #stage II voxelization - in/out, local thickness -> VoxelData
 
 include("solve_eikonal_parallel.jl") # stage III - parallel voxel eikonal
 
-include("tangent_projection.jl") # stage IV project to surface  mesh and compute 2.5d local FOT per half thickness layer
+include("tangent_projection.jl") # stage IV project to surface mesh per triangle and compute 2.5d local FOT per half thickness layer
 
 # include("exporter.jl") #stage V - export to different formats
 
