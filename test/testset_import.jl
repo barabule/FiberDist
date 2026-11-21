@@ -39,4 +39,9 @@ end
     voxeldata.voxel_spacing)
     @test true
 
+    actual_fill_time = fill_time[isfinite.(fill_time)]
+    (tmin, tmax) = extrema(actual_fill_time)
+    @info "tmin = $tmin, tmax = $tmax"
+    @test length(actual_fill_time) == sum(voxeldata.grid)
+
 end
