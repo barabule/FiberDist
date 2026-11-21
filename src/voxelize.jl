@@ -95,7 +95,7 @@ function VoxelData(
     voxel_spacing = (dx, dy, dz)
     corner = corner
     thickness = compute_squared_thickness_u16(grid)
-    return VoxelData{T}(grid, thickness, voxel_spacing, corner)
+    return VoxelData(grid, thickness, voxel_spacing, corner)
 end
 
 

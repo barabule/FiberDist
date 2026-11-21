@@ -23,19 +23,13 @@ end
     voxeldata = FD.VoxelData(meshdata)
     @test size(voxeldata.grid)[1] == 100
 
+    wt = FD.wallthickness(voxeldata, 25)
+    wt2 = FD.wallthickness(voxeldata, 12, 4, 5)
+
     gates = [FD.ValveGate(position = FD.Point3f(0, 25, 0))]
     @test true
 
-    # gate_voxels = FD.gates_to_voxels(gates, voxeldata)
-    # @test true
-
     
-
-    # fill_time = FD.solve_eikonal_fim_ka(
-    #                         voxeldata.grid,
-    #                         tfield.thick_r_sq,
-    #                         gate_voxels,
-    # voxeldata.voxel_spacing)
     fill_time = FD.solve_eikonal_fim_ka(voxeldata, gates)
     @test true
 

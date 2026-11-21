@@ -46,24 +46,31 @@ struct VoxelData{T<:Real} # in/out indicator
     thickness::Array{UInt16, 3} #squared voxel radius
     voxel_spacing::Tuple{T, T, T}
     corner::StaticVector{3, T}
+
+    function VoxelData(g::BitArray{3}, thickness::Array{UInt16, 3}, vs::Tuple{T, T, T}, CP::StaticVector{3, T}) where {T<:Real}
+        size(g) == size(thickness) || error("grid and thickness arrays must have the same size")
+       
+        return new{T}(g, thickness, vs, CP)
+    end
 end
 
-# """
-#     ThicknessField
 
-# Compact 3D inscribed-sphere local wall half-thickness stored in squared voxel
-# units (`UInt16`, 2 bytes/voxel). Physical full wall thickness at `(i, j, k)` is:
-# `h = 2 * sqrt(thick_r_sq[i, j, k]) * Δx`.
-# """
-# struct ThicknessField
-#     thick_r_sq::Array{UInt16, 3}
-# end
 
-# # Forward basic array indexing/size helpers for convenience
-# Base.size(tf::ThicknessField) = size(tf.thick_r_sq)
-# @inline Base.getindex(tf::ThicknessField, i::Int, j::Int, k::Int) = @inbounds tf.thick_r_sq[i, j, k]
-# @inline Base.getindex(tf::ThicknessField, idx::Int) = @inbounds tf.thick_r_sq[idx]
+function wallthickness(VD::VoxelData, idx::Int)
+    if VD.grid[idx]
+        return 2 * sqrt(VD.thickness[idx]) * VD.voxel_spacing[1]
+    else
+        return 0.0
+    end
+end
 
+function wallthickness(VD::VoxelData, i::Int, j::Int, k::Int)
+    if VD.grid[i, j, k]
+        return 2 * sqrt(VD.thickness[i, j, k]) * VD.voxel_spacing[1]
+    else
+        return 0.0
+    end
+end
 
 
 """
