@@ -1,21 +1,26 @@
 struct ValveGate{T<:Real, V<:StaticVector{3, T}}
     position::V
     open_time::T
+    function ValveGate(p<:StaticVector, t<:Real)
+        T = eltype(p)
+        t_new = clamp(t, zero(T), T(Inf)) |> T #open_time must be > 0
+        return new{T}(p, t_new)
+    end
 end
 
-# Convenience constructor so mixed precision (e.g., Point3f + Float64) works seamlessly:
-function ValveGate(pos::StaticVector{3, T1}, open_time::T2) where {T1<:Real, T2<:Real}
-    T = float(promote_type(T1, T2))
-    return ValveGate{T, SVector{3, T}}(SVector{3, T}(pos), T(open_time))
-end
+# # Convenience constructor so mixed precision (e.g., Point3f + Float64) works seamlessly:
+# function ValveGate(pos::StaticVector{3, T1}, open_time::T2) where {T1<:Real, T2<:Real}
+#     T = float(promote_type(T1, T2))
+#     return ValveGate{T, SVector{3, T}}(SVector{3, T}(pos), T(open_time))
+# end
 
 
-struct MeshData{T<:Real}
+struct MeshData{T<:Real} #Struct contains a mesh and its acceleration struct
     mesh::GeometryBasics.AbstractMesh{3, T}
     tlas::Raycore.AbstractAdaptedAccel
 end
 
-struct VoxelData{T<:Real}
+struct VoxelData{T<:Real} # in/out indicator
     grid::BitArray{3}
     voxel_spacing::Tuple{T, T, T}
     corner::StaticVector{3, T}
@@ -59,7 +64,7 @@ active_indices(m::SparseVoxelMask) = m.nz_inds
 end
 
 # Fast O(k) coordinate extraction for GLMakie scatter!
-function mask_points(m::SparseVoxelMask, spacing, corner)
+function coordinates(m::SparseVoxelMask, spacing, corner)
     cart = CartesianIndices(m.dims)
     pts = Vector{Point3f}(undef, length(m.nz_inds))
     @inbounds for (idx, lin) in enumerate(m.nz_inds)
@@ -71,4 +76,9 @@ function mask_points(m::SparseVoxelMask, spacing, corner)
         )
     end
     return pts
+end
+
+
+function coordinates(m::SparseVoxelMask, voxeldata::VoxelData)
+    return coordinates(m, voxeldata.voxel_spacing, voxeldata.corner)
 end
