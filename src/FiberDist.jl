@@ -18,15 +18,15 @@ using Random
 
 include("typedefs.jl")
 include("import_mesh.jl") #stage I - load CAD, mesh and return meshdata struct
-include("voxelize.jl") #stage II voxelization - in/out, local thickness
-#stage III - solve Eikonal , voxel gradient, defects
+# include("voxelize.jl") #stage II voxelization - in/out, local thickness
+# #stage III - solve Eikonal , voxel gradient, defects
 
-include("tangent_projection.jl") # stage IV project to surface  mesh and compute 2.5d local FOT per half thickness layer
+# include("tangent_projection.jl") # stage IV project to surface  mesh and compute 2.5d local FOT per half thickness layer
 
-include("exporter.jl") #stage V - export to different formats
+# include("exporter.jl") #stage V - export to different formats
 
-include("viz.jl") #extra
-include("gui.jl")
+# include("viz.jl") #extra
+# include("gui.jl")
 
 
 

@@ -22,56 +22,52 @@ function load_step_mesh_as_surface(filepath::String;
     
     gmsh.finalize()
     
-    nodes = reshape(coord_coords, 3, :)
+    pointmatrix = reshape(coord_coords, 3, :)
     # Extract triangles (element type 2 in Gmsh)
     tri_node_tags = elem_node_tags[findfirst(elem_types .== 2)]
-    elements = reshape(tri_node_tags, 3, :)
+    trimatrix = reshape(tri_node_tags, 3, :)
+
+    nodes = [Point3f(pointmatrix[1, i], pointmatrix[2, i], pointmatrix[3, i]) for i in axes(pointmatrix, 2)]
     
-    return (;nodes, elements) |> build_scene_bvh
+    elements = map(1:size(trimatrix, 2)) do i
+        i1, i2, i3 = trimatrix[1, i], trimatrix[2, i], trimatrix[3, i]
+        GeometryBasics.TriangleFace(i1, i2, i3)
+    end
+    
+    return (;nodes,
+            elements) |> build_scene_bvh
 end
 
 # 2. Build Raycore BVH Acceleration Structure from Mesh
 function build_scene_bvh(data)
     nodes, elements = data
-    # Convert nodes & elements into GeometryBasics triangles format required by Raycore
-    points = [Point3f(nodes[1, i], nodes[2, i], nodes[3, i]) for i in axes(nodes, 2)]
-    
-    triangles = map(1:size(elements, 2)) do i
-        i1, i2, i3 = elements[1, i], elements[2, i], elements[3, i]
-        GeometryBasics.TriangleFace(i1, i2, i3)
-    end
-    # @info eltype(triangles)
-    # @info eltype(triangles) <:GeometryBasics.AbstractFace
-    # Build Raycore Top-Level Acceleration Structure (TLAS / BVH)
-    mesh = triangle_mesh(points, triangles) #we don't need vertex normals
-    # tlas = Raycore.TLAS(KernelAbstractions.CPU()) 
-    # push!(tlas, mesh)
-    # sync!(tlas)
+   
+    mesh = GeometryBasics.mesh(nodes, elements) #we don't need vertex normals
     tlas = TLAS([mesh], (mi, ti) -> UInt32(mi))
-    # return (;mesh, tlas)
     return MeshData{Float32}(mesh, tlas)
 end
 
 
 
-function meshdata(fn::AbstractString; check_watertight = false)
+function meshdata(fn::AbstractString; check_watertight = true)
     isfile(fn) || throw(ArgumentError("File does not exist: $fn"))
 
     raw_mesh = load(fn)
-    if !(data isa GeometryBasics.AbstractMesh)
+    if !(raw_mesh isa GeometryBasics.AbstractMesh)
         error("Loaded file is not a mesh file (got $(typeof(raw_mesh)))")
     end
 
     tri_faces = GeometryBasics.decompose(TriangleFace{UInt32}, raw_mesh)
 
-    vertices = coordinates(raw_mesh)
+    vertices = raw_mesh.position
 
     welded = weld_vertices(vertices, tri_faces)
-    if !is_watertight(welded.elements)
+
+    if check_watertight && !is_watertight(welded.elements)
         error("Mesh is not is_watertight!")
     end
 
-    return build_scene_bvh((;nodes = vertices, elements = tri_faces))
+    return build_scene_bvh(welded)
 end
 
 """

@@ -2,7 +2,7 @@
 
 julia_version = "1.13.2"
 manifest_format = "2.1"
-project_hash = "1f5f5afbe8c273f38b42513119fb80a655362252"
+project_hash = "01b438f961d6738063eb86ba07e3b8ec21f7e7b1"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -700,7 +700,7 @@ version = "0.4.20"
     Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
 
 [[deps.FiberDist]]
-deps = ["DataStructures", "DistanceTransforms", "GLMakie", "GeometryBasics", "Gmsh", "Interpolations", "KernelAbstractions", "LinearAlgebra", "Printf", "Random", "Raycore", "SparseArrays", "StaticArrays"]
+deps = ["DataStructures", "DistanceTransforms", "FileIO", "GLMakie", "GeometryBasics", "Gmsh", "Interpolations", "KernelAbstractions", "LinearAlgebra", "MeshIO", "Printf", "Random", "Raycore", "SparseArrays", "StaticArrays"]
 path = "."
 uuid = "fb809db5-e7a1-44f1-ae43-b14be2969534"
 version = "0.1.0"

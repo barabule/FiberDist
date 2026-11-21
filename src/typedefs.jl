@@ -1,10 +1,10 @@
 struct ValveGate{T<:Real, V<:StaticVector{3, T}}
     position::V
     open_time::T
-    function ValveGate(p<:StaticVector, t<:Real)
-        T = eltype(p)
+    function ValveGate(p::PT, t::T1) where {PT<:StaticVector{3, T}, T1<:Real} where T<:Real
+        
         t_new = clamp(t, zero(T), T(Inf)) |> T #open_time must be > 0
-        return new{T}(p, t_new)
+        return new{T, PT}(p, t_new)
     end
 end
 
