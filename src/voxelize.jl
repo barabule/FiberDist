@@ -3,14 +3,14 @@
 
 
 """
-    voxelize_mesh(meshdata; res=100, padding=0.05)
+    VoxelData(meshdata; res=100, padding=0.05)
 
 Voxelizes a Raycore acceleration structure (`meshdata.tlas`, `meshdata.mesh`) into a 
 3D `BitArray` using multi-threaded Z-axis ray-casting parity (even/odd rule).
 Returns `(; grid, voxel_spacing, corner)`.
 """
-function voxelize_mesh(
-    meshdata;
+function VoxelData(
+    meshdata::MeshData;
     res::Integer = 100,       # resolution across longest axis
     padding::Real = 0.05      # relative padding to bounding box span
 )
@@ -28,7 +28,7 @@ function voxelize_mesh(
     span      = max_pt - corner
 
     max_span = maximum(span)
-    dx = max_span / T(res) # uniform cubic voxel size
+    dx = max_span / T(res) # uniform cubic voxel size for now
     dy = dx
     dz = dx
 
@@ -90,7 +90,7 @@ function voxelize_mesh(
         end
     end
 
-    # return (; grid = voxel_grid, voxel_spacing = (dx, dy, dz), corner = corner)
+    
     grid = voxel_grid
     voxel_spacing = (dx, dy, dz)
     corner = corner
@@ -550,267 +550,6 @@ end
 
 
 
-"""
-    analyze_eikonal_field(
-        T_field, voxel_grid, thick_r_sq, voxel_spacing;
-        r_sq = nothing,
-        weld_dot_thresh = -0.3,
-        meld_dot_thresh = 0.4,
-        div_thresh = 0.05,
-        hesitation_quantile = 0.15,
-        core_exponent = 2.0,
-        div_scale = 5.0,
-        max_shear_tilt = 0.08
-    )
-
-Extracts sparse localized defect masks (`weld_lines`, `meld_lines`, `air_traps`) directly
-as `SparseVoxelMask` (`Vector{Int32}` linear indices) without intermediate `BitArray`
-allocations, dense flow-regime masks (`diverging_flow`, `converging_flow`, `hesitation`),
-unit flow directions `û = ∇T / |∇T|`, and the full 6-component symmetric Fiber Orientation
-Tensor `(a11, a22, a33, a12, a13, a23)`.
-"""
-function analyze_eikonal_field(
-    T_field::AbstractArray{T1, 3},
-    voxel_grid::AbstractArray{Bool, 3},
-    thick_r_sq::AbstractArray{UInt16, 3},
-    voxel_spacing::Union{NTuple{3, T2}, StaticVector{3, T2}};
-    r_sq::Union{Nothing, AbstractArray{UInt16, 3}} = nothing,
-    weld_dot_thresh::Real = -0.3,
-    meld_dot_thresh::Real = 0.4,
-    div_thresh::Real = 0.05,
-    hesitation_quantile::Real = 0.15,
-    core_exponent::Real = 2.0,
-    div_scale::Real = 5.0,
-    max_shear_tilt::Real = 0.08
-) where {T1<:Real, T2<:Real}
-
-    T = float(promote_type(T1, T2))
-    dims = size(voxel_grid)
-    nx, ny, nz = dims
-    @assert prod(dims) <= typemax(Int32) "Grid voxel count exceeds Int32 indexing limit; use Int64 indices"
-
-    dx, dy, dz = T(voxel_spacing[1]), T(voxel_spacing[2]), T(voxel_spacing[3])
-    lin_inds = LinearIndices(dims)
-
-    # 1. Compute interior-only 3D gradient ∇T and unit flow direction û
-    flow_dirs = fill(zero(SVector{3, T}), nx, ny, nz)
-    front_speed = zeros(T, nx, ny, nz)
-
-    @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
-        (voxel_grid[i, j, k] && isfinite(T_field[i, j, k])) || continue
-        tc = T(T_field[i, j, k])
-
-        xm = i > 1  && voxel_grid[i-1, j, k] && isfinite(T_field[i-1, j, k])
-        xp = i < nx && voxel_grid[i+1, j, k] && isfinite(T_field[i+1, j, k])
-        gx = (xm && xp) ? (T(T_field[i+1, j, k]) - T(T_field[i-1, j, k])) / (T(2) * dx) :
-             xp         ? (T(T_field[i+1, j, k]) - tc) / dx :
-             xm         ? (tc - T(T_field[i-1, j, k])) / dx : zero(T)
-
-        ym = j > 1  && voxel_grid[i, j-1, k] && isfinite(T_field[i, j-1, k])
-        yp = j < ny && voxel_grid[i, j+1, k] && isfinite(T_field[i, j+1, k])
-        gy = (ym && yp) ? (T(T_field[i, j+1, k]) - T(T_field[i, j-1, k])) / (T(2) * dy) :
-             yp         ? (T(T_field[i, j+1, k]) - tc) / dy :
-             ym         ? (tc - T(T_field[i, j-1, k])) / dy : zero(T)
-
-        zm = k > 1  && voxel_grid[i, j, k-1] && isfinite(T_field[i, j, k-1])
-        zp = k < nz && voxel_grid[i, j, k+1] && isfinite(T_field[i, j, k+1])
-        gz = (zm && zp) ? (T(T_field[i, j, k+1]) - T(T_field[i, j, k-1])) / (T(2) * dz) :
-             zp         ? (T(T_field[i, j, k+1]) - tc) / dz :
-             zm         ? (tc - T(T_field[i, j, k-1])) / dz : zero(T)
-
-        g = SVector{3, T}(gx, gy, gz)
-        gn = norm(g)
-        if gn > T(1e-9)
-            flow_dirs[i, j, k] = g / gn
-            front_speed[i, j, k] = inv(gn)
-        end
-    end
-
-    valid_speeds = [front_speed[idx] for idx in eachindex(voxel_grid) if voxel_grid[idx] && front_speed[idx] > zero(T)]
-    speed_cutoff = isempty(valid_speeds) ? zero(T) :
-        sort(valid_speeds)[max(1, round(Int, T(hesitation_quantile) * length(valid_speeds)))]
-
-    # 2. Direct sparse index buffers for localized defects (zero intermediate BitArrays)
-    #    Iterating `for k in 1:nz, j in 1:ny, i in 1:nx` visits linear indices in strictly
-    #    ascending order, so `nz_inds` are guaranteed sorted upon completion.
-    weld_inds = Int32[]
-    meld_inds = Int32[]
-    trap_inds = Int32[]
-
-    # Dense BitArray{3} masks for broad flow regimes
-    diverging_flow  = falses(nx, ny, nz)
-    converging_flow = falses(nx, ny, nz)
-    hesitation      = falses(nx, ny, nz)
-
-    # Full 6-component symmetric Fiber Orientation Tensor
-    a11 = zeros(T, nx, ny, nz)
-    a22 = zeros(T, nx, ny, nz)
-    a33 = zeros(T, nx, ny, nz)
-    a12 = zeros(T, nx, ny, nz)
-    a13 = zeros(T, nx, ny, nz)
-    a23 = zeros(T, nx, ny, nz)
-
-    offsets = (
-        CartesianIndex(-1, 0, 0), CartesianIndex(1, 0, 0),
-        CartesianIndex(0, -1, 0), CartesianIndex(0, 1, 0),
-        CartesianIndex(0, 0, -1), CartesianIndex(0, 0, 1)
-    )
-
-    w_thresh = T(weld_dot_thresh)
-    m_thresh = T(meld_dot_thresh)
-    d_thresh = T(div_thresh)
-    p_exp    = T(core_exponent)
-    d_scale  = T(div_scale)
-    s_tilt   = T(max_shear_tilt)
-
-    # 3. Single-pass extraction of sparse defect indices, dense masks, and 6-component FOT
-    @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
-        (voxel_grid[i, j, k] && isfinite(T_field[i, j, k])) || continue
-
-        lin_idx = Int32(lin_inds[i, j, k])
-        tc = T(T_field[i, j, k])
-        u_c = flow_dirs[i, j, k]
-        has_flow = norm(u_c) > T(1e-6)
-
-        min_dot = one(T)
-        is_local_max = true
-        has_valid_nbr = false
-
-        for off in offsets
-            ii, jj, kk = i + off[1], j + off[2], k + off[3]
-            (1 <= ii <= nx && 1 <= jj <= ny && 1 <= kk <= nz) || continue
-            (voxel_grid[ii, jj, kk] && isfinite(T_field[ii, jj, kk])) || continue
-
-            has_valid_nbr = true
-            if T(T_field[ii, jj, kk]) > tc
-                is_local_max = false
-            end
-
-            u_n = flow_dirs[ii, jj, kk]
-            if has_flow && norm(u_n) > T(1e-6)
-                d_un = dot(u_c, u_n)
-                if d_un < min_dot
-                    min_dot = d_un
-                end
-            end
-        end
-
-        if has_valid_nbr && is_local_max && tc > zero(T)
-            push!(trap_inds, lin_idx)
-        end
-
-        is_weld = false
-        if has_flow
-            if min_dot < w_thresh
-                push!(weld_inds, lin_idx)
-                is_weld = true
-            elseif min_dot < m_thresh
-                push!(meld_inds, lin_idx)
-            end
-        end
-
-        if front_speed[i, j, k] > zero(T) && front_speed[i, j, k] <= speed_cutoff
-            hesitation[i, j, k] = true
-        end
-
-        # Flow Divergence ∇ ⋅ û
-        dux_dx = (i > 1 && i < nx && voxel_grid[i-1,j,k] && voxel_grid[i+1,j,k]) ?
-                 (flow_dirs[i+1,j,k][1] - flow_dirs[i-1,j,k][1]) / (T(2) * dx) : zero(T)
-        duy_dy = (j > 1 && j < ny && voxel_grid[i,j-1,k] && voxel_grid[i,j+1,k]) ?
-                 (flow_dirs[i,j+1,k][2] - flow_dirs[i,j-1,k][2]) / (T(2) * dy) : zero(T)
-        duz_dz = (k > 1 && k < nz && voxel_grid[i,j,k-1] && voxel_grid[i,j,k+1]) ?
-                 (flow_dirs[i,j,k+1][3] - flow_dirs[i,j,k-1][3]) / (T(2) * dz) : zero(T)
-
-        div_u = dux_dx + duy_dy + duz_dz
-        if div_u > d_thresh
-            diverging_flow[i, j, k] = true
-        elseif div_u < -d_thresh
-            converging_flow[i, j, k] = true
-        end
-
-        if !has_flow
-            a11[i, j, k] = T(1) / T(3)
-            a22[i, j, k] = T(1) / T(3)
-            a33[i, j, k] = T(1) / T(3)
-            continue
-        end
-
-        # Local orthonormal frame (e1 = flow, e2 = in-plane transverse, e3 = wall normal)
-        e1 = u_c
-        if !isnothing(r_sq) && i > 1 && i < nx && j > 1 && j < ny && k > 1 && k < nz
-            gn_x = T(Int32(r_sq[i+1,j,k]) - Int32(r_sq[i-1,j,k]))
-            gn_y = T(Int32(r_sq[i,j+1,k]) - Int32(r_sq[i,j-1,k]))
-            gn_z = T(Int32(r_sq[i,j,k+1]) - Int32(r_sq[i,j,k-1]))
-            n_raw = SVector{3, T}(gn_x, gn_y, gn_z)
-            n_ortho = n_raw - dot(n_raw, e1) * e1
-            if norm(n_ortho) > T(1e-5)
-                e3 = normalize(n_ortho)
-            else
-                ref = abs(e1[1]) < T(0.9) ? SVector{3, T}(1, 0, 0) : SVector{3, T}(0, 1, 0)
-                e3 = normalize(cross(e1, ref))
-            end
-        else
-            ref = abs(e1[1]) < T(0.9) ? SVector{3, T}(1, 0, 0) : SVector{3, T}(0, 1, 0)
-            e3 = normalize(cross(e1, ref))
-        end
-        e2 = cross(e3, e1)
-
-        # Normalized through-thickness depth ζ ∈ [0 (core), 1 (mold wall skin)]
-        ζ = if !isnothing(r_sq) && thick_r_sq[i, j, k] > UInt16(0)
-            ratio = clamp(T(r_sq[i, j, k]) / T(thick_r_sq[i, j, k]), zero(T), one(T))
-            one(T) - sqrt(ratio)
-        else
-            T(0.5)
-        end
-
-        # Local tensor components (λ_flow, λ_trans, λ_norm, λ_13)
-        if is_weld
-            λ_flow, λ_trans, λ_norm, λ_13 = T(0.15), T(0.78), T(0.07), zero(T)
-        else
-            α_div = T(0.5) * (one(T) + tanh(div_u * d_scale))
-            c_flow  = (one(T) - α_div) * T(0.72) + α_div * T(0.18)
-            c_trans = (one(T) - α_div) * T(0.20) + α_div * T(0.74)
-            c_norm  = T(0.08)
-
-            s_flow, s_trans, s_norm = T(0.84), T(0.12), T(0.04)
-
-            w_shear = ζ^p_exp
-            λ_flow  = (one(T) - w_shear) * c_flow  + w_shear * s_flow
-            λ_trans = (one(T) - w_shear) * c_trans + w_shear * s_trans
-            λ_norm  = (one(T) - w_shear) * c_norm  + w_shear * s_norm
-            λ_13    = s_tilt * T(4) * ζ * (one(T) - ζ) * w_shear
-        end
-
-        # Full symmetric tensor rotation: A_global = R * A_local * Rᵀ
-        a11[i, j, k] = λ_flow * e1[1]^2 + λ_trans * e2[1]^2 + λ_norm * e3[1]^2 +
-                       T(2) * λ_13 * e1[1] * e3[1]
-        a22[i, j, k] = λ_flow * e1[2]^2 + λ_trans * e2[2]^2 + λ_norm * e3[2]^2 +
-                       T(2) * λ_13 * e1[2] * e3[2]
-        a33[i, j, k] = λ_flow * e1[3]^2 + λ_trans * e2[3]^2 + λ_norm * e3[3]^2 +
-                       T(2) * λ_13 * e1[3] * e3[3]
-
-        a12[i, j, k] = λ_flow * e1[1]*e1[2] + λ_trans * e2[1]*e2[2] + λ_norm * e3[1]*e3[2] +
-                       λ_13 * (e1[1]*e3[2] + e3[1]*e1[2])
-        a13[i, j, k] = λ_flow * e1[1]*e1[3] + λ_trans * e2[1]*e2[3] + λ_norm * e3[1]*e3[3] +
-                       λ_13 * (e1[1]*e3[3] + e3[1]*e1[3])
-        a23[i, j, k] = λ_flow * e1[2]*e1[3] + λ_trans * e2[2]*e2[3] + λ_norm * e3[2]*e3[3] +
-                       λ_13 * (e1[2]*e3[3] + e3[2]*e1[3])
-    end
-
-    masks = (;
-        weld_lines      = SparseVoxelMask(dims, weld_inds),
-        meld_lines      = SparseVoxelMask(dims, meld_inds),
-        air_traps       = SparseVoxelMask(dims, trap_inds),
-        diverging_flow,
-        converging_flow,
-        hesitation
-    )
-
-    fot = (; a11, a22, a33, a12, a13, a23)
-
-    return (; masks, flow_dirs, front_speed, fot)
-end
-
 
 
 # Helper to extract world coordinates of all `true` voxels in any BitArray{3} mask
@@ -828,5 +567,109 @@ function mask_points(mask::BitArray{3}, spacing, corner)
 end
 
 
+"""
+    gates_to_voxels(
+        gates::AbstractVector{ValveGate},
+        voxeldata;
+        fallback_search_radius_vox::Int = 3
+    ) -> Vector{CartesianIndex{3}}
 
+Maps a vector of `ValveGate`s onto active interior solid voxels in `voxeldata.grid`.
+- Collects all solid voxels within `gate.radius` of `gate.position`.
+- If `gate.radius == 0` or no solid voxel lies strictly within `gate.radius` (e.g., when
+  picking directly on a surface triangle), snaps to the nearest solid voxel within
+  `fallback_search_radius_vox`.
+"""
+function gates_to_voxels(
+    gates::AbstractVector{ValveGate},
+    voxeldata::VoxelData;
+    fallback_search_radius_vox::Int = 3
+)
+    grid = voxeldata.grid
+    nx, ny, nz = size(grid)
+
+    spacing_raw = voxeldata.voxel_spacing
+    corner_raw  = voxeldata.corner
+
+    dx, dy, dz = Float32(spacing_raw[1]), Float32(spacing_raw[2]), Float32(spacing_raw[3])
+    ox, oy, oz = Float32(corner_raw[1]),  Float32(corner_raw[2]),  Float32(corner_raw[3])
+
+    gate_voxels = CartesianIndex{3}[]
+    seen = Set{CartesianIndex{3}}()
+
+    for gate in gates
+        gx, gy, gz = gate.position[1], gate.position[2], gate.position[3]
+
+        # Continuous voxel index corresponding to voxel centers at ox + (i - 0.5) * dx
+        fi = (gx - ox) / dx + 0.5f0
+        fj = (gy - oy) / dy + 0.5f0
+        fk = (gz - oz) / dz + 0.5f0
+
+        found_any = false
+        r = max(gate.radius, 0.0f0)
+        r2 = r * r
+
+        if r > 0.0f0
+            rx_vox = ceil(Int, r / dx) + 1
+            ry_vox = ceil(Int, r / dy) + 1
+            rz_vox = ceil(Int, r / dz) + 1
+
+            ic, jc, kc = round(Int, fi), round(Int, fj), round(Int, fk)
+            i_lo, i_hi = max(1, ic - rx_vox), min(nx, ic + rx_vox)
+            j_lo, j_hi = max(1, jc - ry_vox), min(ny, jc + ry_vox)
+            k_lo, k_hi = max(1, kc - rz_vox), min(nz, kc + rz_vox)
+
+            @inbounds for k in k_lo:k_hi, j in j_lo:j_hi, i in i_lo:i_hi
+                grid[i, j, k] || continue
+                vx = ox + (Float32(i) - 0.5f0) * dx
+                vy = oy + (Float32(j) - 0.5f0) * dy
+                vz = oz + (Float32(k) - 0.5f0) * dz
+                d2 = (vx - gx)^2 + (vy - gy)^2 + (vz - gz)^2
+
+                if d2 <= r2
+                    c = CartesianIndex(i, j, k)
+                    if !(c in seen)
+                        push!(seen, c)
+                        push!(gate_voxels, c)
+                    end
+                    found_any = true
+                end
+            end
+        end
+
+        # Fallback: snap to nearest solid voxel (handles radius == 0 or surface-picked points)
+        if !found_any
+            ic = clamp(round(Int, fi), 1, nx)
+            jc = clamp(round(Int, fj), 1, ny)
+            kc = clamp(round(Int, fk), 1, nz)
+
+            best_d2 = Inf32
+            best_c = CartesianIndex(0, 0, 0)
+
+            for rad in 0:fallback_search_radius_vox
+                @inbounds for k in max(1, kc - rad):min(nz, kc + rad),
+                              j in max(1, jc - rad):min(ny, jc + rad),
+                              i in max(1, ic - rad):min(nx, ic + rad)
+                    grid[i, j, k] || continue
+                    vx = ox + (Float32(i) - 0.5f0) * dx
+                    vy = oy + (Float32(j) - 0.5f0) * dy
+                    vz = oz + (Float32(k) - 0.5f0) * dz
+                    d2 = (vx - gx)^2 + (vy - gy)^2 + (vz - gz)^2
+                    if d2 < best_d2
+                        best_d2 = d2
+                        best_c = CartesianIndex(i, j, k)
+                    end
+                end
+                isfinite(best_d2) && break
+            end
+
+            if isfinite(best_d2) && !(best_c in seen)
+                push!(seen, best_c)
+                push!(gate_voxels, best_c)
+            end
+        end
+    end
+
+    return gate_voxels
+end
 

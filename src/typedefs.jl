@@ -1,18 +1,20 @@
-struct ValveGate{T<:Real, V<:StaticVector{3, T}}
-    position::V
-    open_time::T
-    function ValveGate(p::PT, t::T1) where {PT<:StaticVector{3, T}, T1<:Real} where T<:Real
-        
-        t_new = clamp(t, zero(T), T(Inf)) |> T #open_time must be > 0
-        return new{T, PT}(p, t_new)
-    end
+
+
+
+"""
+    ValveGate
+
+Represents an injection gate at 3D world coordinates `position` with orifice `radius`
+and optional `open_time` (default `0.0f0` for simultaneous gates, or `> 0` for sequential
+cascade valve gating).
+"""
+Base.@kwdef struct ValveGate
+    position::SVector{3, Float32}
+    radius::Float32 = 0.0f0
+    open_time::Float32 = 0.0f0
 end
 
-# # Convenience constructor so mixed precision (e.g., Point3f + Float64) works seamlessly:
-# function ValveGate(pos::StaticVector{3, T1}, open_time::T2) where {T1<:Real, T2<:Real}
-#     T = float(promote_type(T1, T2))
-#     return ValveGate{T, SVector{3, T}}(SVector{3, T}(pos), T(open_time))
-# end
+
 
 
 struct MeshData{T<:Real} #Struct contains a mesh and its acceleration struct

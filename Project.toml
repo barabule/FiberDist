@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["barabule <werner.zanzinger@gmail.com>"]
 
 [deps]
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
 DistanceTransforms = "71182807-4d06-4237-8dd0-bdafe4d097e2"
 FileIO = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
@@ -21,6 +22,7 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [compat]
+Adapt = "4.8.0"
 DataStructures = "0.19.6"
 DistanceTransforms = "0.2.0"
 FileIO = "1.20.0"

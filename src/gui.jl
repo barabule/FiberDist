@@ -14,9 +14,9 @@ function main()
         load_step_mesh_as_surface(fn)
     end
     res = Observable(100)
-    # voxeldata = Observable(voxelize_mesh(meshdata[]; res = res[]))
+    # voxeldata = Observable(VoxelData(meshdata[]; res = res[]))
     voxeldata = lift(meshdata, res) do md, r
-        voxelize_mesh(md; res = r)
+        VoxelData(md; res = r)
     end
 
     # interior_points = Observable(mask_points(voxeldata[].grid, voxeldata[].voxel_spacing, voxeldata[].corner))
