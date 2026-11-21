@@ -388,14 +388,14 @@ function find_nearest_interior_voxel(pos, voxeldata::VoxelData{T}) where T
 end
 
 
-# Physical wall thickness h at voxel (i, j, k):
-@inline get_thickness(thick_r_sq::Array{UInt16, 3}, i, j, k, dx::T) where {T<:AbstractFloat} =
-    T(2) * sqrt(T(thick_r_sq[i, j, k])) * dx
+# # Physical wall thickness h at voxel (i, j, k):
+# @inline get_thickness(thick_r_sq::Array{UInt16, 3}, i, j, k, dx::T) where {T<:AbstractFloat} =
+#     T(2) * sqrt(T(thick_r_sq[i, j, k])) * dx
 
-# Bonus: Eikonal Hele-Shaw speed F = h² needs NO sqrt() at all!
-# Since h = 2 * sqrt(r_sq) * dx,  h² = 4 * r_sq * dx²
-@inline get_hele_shaw_speed(thick_r_sq::Array{UInt16, 3}, i, j, k, dx::T) where {T<:AbstractFloat} =
-    T(4) * T(thick_r_sq[i, j, k]) * (dx * dx)
+# # Bonus: Eikonal Hele-Shaw speed F = h² needs NO sqrt() at all!
+# # Since h = 2 * sqrt(r_sq) * dx,  h² = 4 * r_sq * dx²
+# @inline get_hele_shaw_speed(thick_r_sq::Array{UInt16, 3}, i, j, k, dx::T) where {T<:AbstractFloat} =
+#     T(4) * T(thick_r_sq[i, j, k]) * (dx * dx)
 
 
 

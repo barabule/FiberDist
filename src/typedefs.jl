@@ -72,6 +72,27 @@ function wallthickness(VD::VoxelData, i::Int, j::Int, k::Int)
     end
 end
 
+#Eikonal Hele-Shaw speed F = h² needs NO sqrt() at all!
+# Since h = 2 * sqrt(r_sq) * dx,  h² = 4 * r_sq * dx²
+function flowvelocity(VD::VoxelData, idx::Int)
+    if VD.grid[idx]
+        dx = VD.voxel_spacing[1]
+        return 4 * VD.thickness[idx] * dx * dx
+    else
+        return 0.0
+    end
+end
+
+function flowvelocity(VD::VoxelData, i::Int, j::Int, k::Int)
+    if VD.grid[i, j, k]
+        dx = VD.voxel_spacing[1]
+        return 4 * VD.thickness[i, j, k] * dx * dx
+    else
+        return 0.0
+    end
+end
+
+
 
 """
     SparseVoxelMask <: AbstractArray{Bool, 3}
