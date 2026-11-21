@@ -22,6 +22,19 @@ struct MeshData{T<:Real} #Struct contains a mesh and its acceleration struct
     tlas::Raycore.AbstractAdaptedAccel
 end
 
+
+"""
+    MeshAdjacency
+
+Thread-safe Compressed Sparse Row (CSR) triangle-to-triangle edge adjacency.
+Build once per `MeshData` and pass into `project_voxel_to_mesh_triangles` across gate runs.
+"""
+struct MeshAdjacency
+    offsets::Vector{Int32}
+    neighbors::Vector{Int32}
+end
+
+
 struct VoxelData{T<:Real} # in/out indicator
     grid::BitArray{3}
     voxel_spacing::Tuple{T, T, T}
