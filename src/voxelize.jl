@@ -94,7 +94,8 @@ function VoxelData(
     grid = voxel_grid
     voxel_spacing = (dx, dy, dz)
     corner = corner
-    return VoxelData{T}(grid, voxel_spacing, corner)
+    thickness = compute_squared_thickness_u16(grid)
+    return VoxelData{T}(grid, thickness, voxel_spacing, corner)
 end
 
 
@@ -164,15 +165,15 @@ function edt_1d_parabolic!(
 end
 
 """
-    compute_squared_thickness_u16(voxeldata::VoxelData) -> ThicknessField
+    compute_squared_thickness_u16(voxel_grid)
 
 Computes the exact 3D Euclidean Distance Transform and Hildebrand–Rüegsegger
 inscribed-sphere local thickness directly in squared voxel units (`UInt16`),
 skipping empty 1D rows/columns/pillars in all three EDT passes and discarding
 the temporary boundary distance buffer upon completion.
 """
-function compute_squared_thickness_u16(voxeldata::VoxelData)
-    voxel_grid = voxeldata.grid
+function compute_squared_thickness_u16(voxel_grid)
+    # voxel_grid = voxeldata.grid
     nx, ny, nz = size(voxel_grid)
     INF_SQ = Int64(nx)^2 + Int64(ny)^2 + Int64(nz)^2 + Int64(1)
     MAX_U16 = Int64(typemax(UInt16))
@@ -297,7 +298,7 @@ function compute_squared_thickness_u16(voxeldata::VoxelData)
         end
     end
 
-    return ThicknessField(thick_r_sq)
+    return thick_r_sq
 end
 
 

@@ -17,12 +17,13 @@ using Printf
 using Random
 using Adapt
 
-include("typedefs.jl")
+include("typedefs.jl") #types
+
 include("import_mesh.jl") #stage I - load CAD, mesh and return meshdata struct
 
-include("voxelize.jl") #stage II voxelization - in/out, local thickness
-# #stage III - solve Eikonal , voxel gradient, defects
-include("solve_eikonal_parallel.jl") #parallel voxel eikonal
+include("voxelize.jl") #stage II voxelization - in/out, local thickness -> VoxelData
+
+include("solve_eikonal_parallel.jl") # stage III - parallel voxel eikonal
 
 include("tangent_projection.jl") # stage IV project to surface  mesh and compute 2.5d local FOT per half thickness layer
 

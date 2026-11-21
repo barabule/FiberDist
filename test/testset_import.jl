@@ -26,17 +26,17 @@ end
     gates = [FD.ValveGate(position = FD.Point3f(0, 25, 0))]
     @test true
 
-    gate_voxels = FD.gates_to_voxels(gates, voxeldata)
-    @test true
+    # gate_voxels = FD.gates_to_voxels(gates, voxeldata)
+    # @test true
 
-    tfield = FD.compute_squared_thickness_u16(voxeldata)
-    @test size(tfield.thick_r_sq) == size(voxeldata.grid)
+    
 
-    fill_time = FD.solve_eikonal_fim_ka(
-                            voxeldata.grid,
-                            tfield.thick_r_sq,
-                            gate_voxels,
-    voxeldata.voxel_spacing)
+    # fill_time = FD.solve_eikonal_fim_ka(
+    #                         voxeldata.grid,
+    #                         tfield.thick_r_sq,
+    #                         gate_voxels,
+    # voxeldata.voxel_spacing)
+    fill_time = FD.solve_eikonal_fim_ka(voxeldata, gates)
     @test true
 
     actual_fill_time = fill_time[isfinite.(fill_time)]
@@ -47,8 +47,7 @@ end
     meshproj = FD.project_voxel_to_mesh_triangles(
                     meshdata,
                     voxeldata,
-                    fill_time,
-                    tfield)
+                    fill_time)
 
 
     @test size(meshproj.centroids) == size(meshdata.mesh.faces)

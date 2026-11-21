@@ -51,14 +51,12 @@ end
     project_voxel_to_mesh_triangles(
     meshdata::MeshData,
     voxeldata::VoxelData,
-    fill_time::AbstractArray{T1, 3},
-    thickness::ThicknessField;
+    fill_time::AbstractArray{T1, 3};
     inward_offset_vox::Real = 0.75,
     weld_dot_thresh::Real = -0.3,
     meld_dot_thresh::Real = 0.4,
     div_thresh::Real = 0.05
 ) where {T1<:Real}
-        
 
 Multi-threaded projection of Eikonal `fill_time`, tangent-projected unit flow directions `e1`,
 local physical wall thickness `h`, in-plane flow divergence `div_u`, and surface defect masks
@@ -68,8 +66,7 @@ Computes 3D gradients on the fly at triangle neighborhoods with zero full-grid v
 function project_voxel_to_mesh_triangles(
     meshdata::MeshData,
     voxeldata::VoxelData,
-    fill_time::AbstractArray{T1, 3},
-    thickness::ThicknessField;
+    fill_time::AbstractArray{T1, 3};
     inward_offset_vox::Real = 0.75,
     weld_dot_thresh::Real = -0.3,
     meld_dot_thresh::Real = 0.4,
@@ -85,7 +82,7 @@ function project_voxel_to_mesh_triangles(
     grid        = voxeldata.grid
     spacing_raw = voxeldata.voxel_spacing
     corner_raw  = voxeldata.corner
-    thick_r_sq  = thickness.thick_r_sq
+    thick_r_sq  = voxeldata.thickness
 
     T = float(promote_type(T1, eltype(spacing_raw), eltype(corner_raw)))
     nx, ny, nz  = size(grid)
