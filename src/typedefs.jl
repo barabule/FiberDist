@@ -15,14 +15,6 @@ Base.@kwdef struct ValveGate
 end
 
 
-
-
-struct MeshData{T<:Real} #Struct contains a mesh and its acceleration struct
-    mesh::GeometryBasics.AbstractMesh{3, T}
-    tlas::Raycore.AbstractAdaptedAccel
-end
-
-
 """
     MeshAdjacency
 
@@ -33,6 +25,20 @@ struct MeshAdjacency
     offsets::Vector{Int32}
     neighbors::Vector{Int32}
 end
+
+
+
+struct MeshData{T<:Real} #Struct contains a mesh and its acceleration struct
+    mesh::GeometryBasics.AbstractMesh{3, T}
+    tlas::Raycore.AbstractAdaptedAccel
+    adj::MeshAdjacency
+end
+
+function MeshData(mesh::GeometryBasics.AbstractMesh{3, T}, tlas::Raycore.AbstractAdaptedAccel) where T<:Real
+    adj = build_mesh_adjacency(mesh)
+    return MeshData{T}(mesh, tlas, adj)
+end
+
 
 
 struct VoxelData{T<:Real} # in/out indicator

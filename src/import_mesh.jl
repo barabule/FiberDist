@@ -50,7 +50,7 @@ function build_scene_bvh(data)
     # @info supertype(typeof(mesh))
 
     tlas = TLAS([mesh], (mi, ti) -> UInt32(mi))
-    return MeshData{Float32}(mesh, tlas)
+    return MeshData(mesh, tlas)
 end
 
 
@@ -160,4 +160,52 @@ function weld_vertices(pts::AbstractVector{PT}, tris::AbstractVector{<:TriangleF
     welded_tris = [TriangleFace(remap[f[1]], remap[f[2]], remap[f[3]]) for f in tris]
     return (;nodes = unique_pts, elements = welded_tris)
 end
+
+
+
+function build_mesh_adjacency(mesh)
+    tris = mesh.faces
+    n_tris = length(tris)
+
+    edges = Vector{Tuple{Int32, Int32, Int32}}(undef, 3 * n_tris)
+    @inbounds for idx in 1:n_tris
+        v1, v2, v3 = tris[idx]
+        t = Int32(idx)
+        edges[3idx - 2] = (min(v1, v2), max(v1, v2), t)
+        edges[3idx - 1] = (min(v2, v3), max(v2, v3), t)
+        edges[3idx]     = (min(v3, v1), max(v3, v1), t)
+    end
+
+    sort!(edges)
+
+    counts = zeros(Int32, n_tris)
+    @inbounds for e in 1:(length(edges) - 1)
+        if edges[e][1] == edges[e + 1][1] && edges[e][2] == edges[e + 1][2]
+            counts[edges[e][3]]     += Int32(1)
+            counts[edges[e + 1][3]] += Int32(1)
+        end
+    end
+
+    offsets = Vector{Int32}(undef, n_tris + 1)
+    offsets[1] = Int32(1)
+    @inbounds for i in 1:n_tris
+        offsets[i + 1] = offsets[i] + counts[i]
+    end
+
+    neighbors = Vector{Int32}(undef, offsets[end] - 1)
+    cursor = copy(offsets)
+
+    @inbounds for e in 1:(length(edges) - 1)
+        if edges[e][1] == edges[e + 1][1] && edges[e][2] == edges[e + 1][2]
+            t1, t2 = edges[e][3], edges[e + 1][3]
+            neighbors[cursor[t1]] = t2; cursor[t1] += Int32(1)
+            neighbors[cursor[t2]] = t1; cursor[t2] += Int32(1)
+        end
+    end
+
+    return MeshAdjacency(offsets, neighbors)
+end
+
+@inline tri_neighbors(adj::MeshAdjacency, idx::Int) =
+    @view adj.neighbors[adj.offsets[idx]:(adj.offsets[idx + 1] - 1)]
 

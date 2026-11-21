@@ -10,51 +10,7 @@ unit-trace identity `a11 + a22 + a33 = 1`, clamped at zero against `Float32` rou
 
 
 
-@inline tri_neighbors(adj::MeshAdjacency, idx::Int) =
-    @view adj.neighbors[adj.offsets[idx]:(adj.offsets[idx + 1] - 1)]
 
-function build_mesh_adjacency(mesh)
-    tris = mesh.faces
-    n_tris = length(tris)
-
-    edges = Vector{Tuple{Int32, Int32, Int32}}(undef, 3 * n_tris)
-    @inbounds for idx in 1:n_tris
-        v1, v2, v3 = tris[idx]
-        t = Int32(idx)
-        edges[3idx - 2] = (min(v1, v2), max(v1, v2), t)
-        edges[3idx - 1] = (min(v2, v3), max(v2, v3), t)
-        edges[3idx]     = (min(v3, v1), max(v3, v1), t)
-    end
-
-    sort!(edges)
-
-    counts = zeros(Int32, n_tris)
-    @inbounds for e in 1:(length(edges) - 1)
-        if edges[e][1] == edges[e + 1][1] && edges[e][2] == edges[e + 1][2]
-            counts[edges[e][3]]     += Int32(1)
-            counts[edges[e + 1][3]] += Int32(1)
-        end
-    end
-
-    offsets = Vector{Int32}(undef, n_tris + 1)
-    offsets[1] = Int32(1)
-    @inbounds for i in 1:n_tris
-        offsets[i + 1] = offsets[i] + counts[i]
-    end
-
-    neighbors = Vector{Int32}(undef, offsets[end] - 1)
-    cursor = copy(offsets)
-
-    @inbounds for e in 1:(length(edges) - 1)
-        if edges[e][1] == edges[e + 1][1] && edges[e][2] == edges[e + 1][2]
-            t1, t2 = edges[e][3], edges[e + 1][3]
-            neighbors[cursor[t1]] = t2; cursor[t1] += Int32(1)
-            neighbors[cursor[t2]] = t1; cursor[t2] += Int32(1)
-        end
-    end
-
-    return MeshAdjacency(offsets, neighbors)
-end
 
 @inline function voxel_gradient_at(
     i::Int, j::Int, k::Int,
@@ -114,7 +70,7 @@ function project_voxel_to_mesh_triangles(
     voxeldata::VoxelData,
     fill_time::AbstractArray{T1, 3},
     thickness::ThicknessField;
-    adj::MeshAdjacency = build_mesh_adjacency(meshdata.mesh),
+    # adj::MeshAdjacency = build_mesh_adjacency(meshdata.mesh),
     inward_offset_vox::Real = 0.75,
     weld_dot_thresh::Real = -0.3,
     meld_dot_thresh::Real = 0.4,
@@ -122,6 +78,7 @@ function project_voxel_to_mesh_triangles(
 ) where {T1<:Real}
 
     mesh   = meshdata.mesh
+    adj = meshdata.adj
     pts    = mesh.position
     tris   = mesh.faces
     n_tris = length(tris)
