@@ -26,7 +26,7 @@ end
     wt = FD.wallthickness(voxeldata, 25)
     wt2 = FD.wallthickness(voxeldata, 12, 4, 5)
 
-    gates = [FD.ValveGate(position = FD.Point3f(0, 25, 0))]
+    gates = [FD.ValveGate(position = FD.Point3f(0, 25, 0), radius = 2.0) ]
     @test true
 
     
