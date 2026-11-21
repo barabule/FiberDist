@@ -164,10 +164,12 @@ function edt_1d_parabolic!(
 end
 
 """
-    compute_squared_thickness_u16(voxel_grid::BitArray{3}) -> Array{UInt16, 3}
+    compute_squared_thickness_u16(voxeldata::VoxelData) -> ThicknessField
 
-Computes the exact 3D Euclidean Distance Transform and inscribed-sphere local thickness
-directly in squared voxel units (`UInt16`, 2 bytes/voxel) from a `BitArray{3}` mask.
+Computes the exact 3D Euclidean Distance Transform and Hildebrand–Rüegsegger
+inscribed-sphere local thickness directly in squared voxel units (`UInt16`),
+skipping empty 1D rows/columns/pillars in all three EDT passes and discarding
+the temporary boundary distance buffer upon completion.
 """
 function compute_squared_thickness_u16(voxeldata::VoxelData)
     voxel_grid = voxeldata.grid
@@ -175,12 +177,10 @@ function compute_squared_thickness_u16(voxeldata::VoxelData)
     INF_SQ = Int64(nx)^2 + Int64(ny)^2 + Int64(nz)^2 + Int64(1)
     MAX_U16 = Int64(typemax(UInt16))
 
-    r_sq = Array{UInt16, 3}(undef, nx, ny, nz)
-    @inbounds for idx in eachindex(voxel_grid, r_sq)
-        r_sq[idx] = voxel_grid[idx] ? typemax(UInt16) : UInt16(0)
-    end
+    # Temporary boundary distance buffer (released when function returns)
+    r_sq = zeros(UInt16, nx, ny, nz)
 
-    # Pass 1: Transform along X (per Y-Z row, multi-threaded)
+    # Pass 1: Transform along X (per Y-Z row, multi-threaded, skipping empty rows)
     Threads.@threads for k in 1:nz
         f = Vector{Int64}(undef, nx)
         d = Vector{Int64}(undef, nx)
@@ -188,9 +188,17 @@ function compute_squared_thickness_u16(voxeldata::VoxelData)
         z = Vector{Float64}(undef, nx + 1)
 
         @inbounds for j in 1:ny
+            any_solid = false
             for i in 1:nx
-                f[i] = voxel_grid[i, j, k] ? INF_SQ : Int64(0)
+                if voxel_grid[i, j, k]
+                    f[i] = INF_SQ
+                    any_solid = true
+                else
+                    f[i] = Int64(0)
+                end
             end
+            any_solid || continue
+
             edt_1d_parabolic!(f, d, v, z, nx, INF_SQ)
             for i in 1:nx
                 r_sq[i, j, k] = UInt16(clamp(d[i], Int64(0), MAX_U16))
@@ -198,7 +206,7 @@ function compute_squared_thickness_u16(voxeldata::VoxelData)
         end
     end
 
-    # Pass 2: Transform along Y (per X-Z column, multi-threaded)
+    # Pass 2: Transform along Y (per X-Z column, multi-threaded, skipping empty columns)
     Threads.@threads for k in 1:nz
         f = Vector{Int64}(undef, ny)
         d = Vector{Int64}(undef, ny)
@@ -206,10 +214,18 @@ function compute_squared_thickness_u16(voxeldata::VoxelData)
         z = Vector{Float64}(undef, ny + 1)
 
         @inbounds for i in 1:nx
+            any_solid = false
             for j in 1:ny
                 val = Int64(r_sq[i, j, k])
-                f[j] = val == MAX_U16 ? INF_SQ : val
+                if val > 0
+                    f[j] = val == MAX_U16 ? INF_SQ : val
+                    any_solid = true
+                else
+                    f[j] = Int64(0)
+                end
             end
+            any_solid || continue
+
             edt_1d_parabolic!(f, d, v, z, ny, INF_SQ)
             for j in 1:ny
                 r_sq[i, j, k] = UInt16(clamp(d[j], Int64(0), MAX_U16))
@@ -217,7 +233,7 @@ function compute_squared_thickness_u16(voxeldata::VoxelData)
         end
     end
 
-    # Pass 3: Transform along Z (per X-Y pillar, multi-threaded)
+    # Pass 3: Transform along Z (per X-Y pillar, multi-threaded, skipping empty pillars)
     Threads.@threads for j in 1:ny
         f = Vector{Int64}(undef, nz)
         d = Vector{Int64}(undef, nz)
@@ -225,10 +241,18 @@ function compute_squared_thickness_u16(voxeldata::VoxelData)
         z = Vector{Float64}(undef, nz + 1)
 
         @inbounds for i in 1:nx
+            any_solid = false
             for k in 1:nz
                 val = Int64(r_sq[i, j, k])
-                f[k] = val == MAX_U16 ? INF_SQ : val
+                if val > 0
+                    f[k] = val == MAX_U16 ? INF_SQ : val
+                    any_solid = true
+                else
+                    f[k] = Int64(0)
+                end
             end
+            any_solid || continue
+
             edt_1d_parabolic!(f, d, v, z, nz, INF_SQ)
             for k in 1:nz
                 r_sq[i, j, k] = UInt16(clamp(d[k], Int64(0), MAX_U16))
@@ -236,7 +260,7 @@ function compute_squared_thickness_u16(voxeldata::VoxelData)
         end
     end
 
-    # Inscribed-Sphere Local Thickness (Hildebrand-Rüegsegger) in pure integer squared units
+    # Inscribed-Sphere Local Thickness (Hildebrand–Rüegsegger) in pure integer squared units
     thick_r_sq = copy(r_sq)
 
     @inbounds for k in 2:(nz - 1), j in 2:(ny - 1), i in 2:(nx - 1)
@@ -273,8 +297,7 @@ function compute_squared_thickness_u16(voxeldata::VoxelData)
         end
     end
 
-    # return (;thick_r_sq, r_sq)
-    return TField(thick_r_sq, r_sq)
+    return ThicknessField(thick_r_sq)
 end
 
 

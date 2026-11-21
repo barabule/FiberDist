@@ -26,12 +26,21 @@ struct VoxelData{T<:Real} # in/out indicator
     corner::StaticVector{3, T}
 end
 
-# thick_r_sq, r_sq
+"""
+    ThicknessField
 
-struct TField
+Compact 3D inscribed-sphere local wall half-thickness stored in squared voxel
+units (`UInt16`, 2 bytes/voxel). Physical full wall thickness at `(i, j, k)` is:
+`h = 2 * sqrt(thick_r_sq[i, j, k]) * Δx`.
+"""
+struct ThicknessField
     thick_r_sq::Array{UInt16, 3}
-    r_sq::Array{UInt16, 3}
 end
+
+# Forward basic array indexing/size helpers for convenience
+Base.size(tf::ThicknessField) = size(tf.thick_r_sq)
+@inline Base.getindex(tf::ThicknessField, i::Int, j::Int, k::Int) = @inbounds tf.thick_r_sq[i, j, k]
+@inline Base.getindex(tf::ThicknessField, idx::Int) = @inbounds tf.thick_r_sq[idx]
 
 
 

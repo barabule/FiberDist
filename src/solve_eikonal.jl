@@ -66,7 +66,7 @@ end
 """
     solve_eikonal_voxel(
     voxeldata::VoxelData{T},
-    tfield::TField,
+    tfield::ThicknessField,
     gates::AbstractVector{<:ValveGate}; 
     min_thickness::Real = 0.1, #
     shift::Integer = 0
@@ -81,7 +81,7 @@ Computes Hele-Shaw speed on the fly without `sqrt` or allocating a Float thickne
 """
 function solve_eikonal_voxel(
     voxeldata::VoxelData{T},
-    tfield::TField,
+    tfield::ThicknessField,
     gates::AbstractVector{<:ValveGate}; 
     min_thickness::Real = 0.1, #
     shift::Integer = 0
