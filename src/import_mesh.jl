@@ -2,7 +2,10 @@
 
 # 1. Load STEP and generate surface mesh via Gmsh
 function load_step_mesh_as_surface(filepath::String;
-            target_element_size = 2.0)
+            target_element_size = 2.0,
+            min_curvature_size = 1.0,
+            min_circle_points = 15,
+            )
 
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 0)
@@ -11,8 +14,8 @@ function load_step_mesh_as_surface(filepath::String;
     
     # --- CONTROL MESH SIZE HERE ---
     gmsh.option.setNumber("Mesh.CharacteristicLengthMax", target_element_size)
-    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 1)
-    gmsh.option.setNumber("Mesh.MinimumCirclePoints", 15)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", min_curvature_size)
+    gmsh.option.setNumber("Mesh.MinimumCirclePoints", min_circle_points)
 
     # Generate 2D surface mesh
     gmsh.model.mesh.generate(2)
@@ -43,6 +46,9 @@ function build_scene_bvh(data)
     nodes, elements = data
    
     mesh = GeometryBasics.mesh(nodes, elements) #we don't need vertex normals
+    # @info typeof(mesh)
+    # @info supertype(typeof(mesh))
+
     tlas = TLAS([mesh], (mi, ti) -> UInt32(mi))
     return MeshData{Float32}(mesh, tlas)
 end
@@ -63,52 +69,65 @@ function meshdata(fn::AbstractString; check_watertight = true)
 
     welded = weld_vertices(vertices, tri_faces)
 
-    if check_watertight && !is_watertight(welded.elements)
+    if check_watertight && !is_valid(welded.nodes, welded.elements)
         error("Mesh is not is_watertight!")
     end
 
     return build_scene_bvh(welded)
 end
 
-"""
-    is_watertight(tris::AbstractVector{<:TriangleFace})
 
-Returns `true` if `mesh` is a closed, 2-manifold triangular mesh with consistent face winding.
-Assumes all mesh nodes are welded (no duplicates). 
 """
-function is_watertight(tris::AbstractVector{<:TriangleFace})
-    # Extract triangle faces (decomposes quads/n-gons if present)
-    
+    is_valid(mesh::GeometryBasics.AbstractMesh)
+
+Returns `true` if `mesh` is:
+1. Closed and 2-manifold (watertight)
+2. Consistently oriented (adjacent triangles have opposite half-edge directions)
+3. Outward-facing (positive signed volume)
+"""
+function is_valid(pts::AbstractVector{<:StaticVector{3}}, tris::AbstractVector{<:GeometryBasics.TriangleFace})
+    # pts = mesh.position
+    # tris = mesh.faces
     isempty(tris) && return false
 
-    # Count occurrences of each directed half-edge (u -> v)
     half_edges = Dict{Tuple{Int, Int}, Int}()
     sizehint!(half_edges, 3 * length(tris))
 
+    # Accumulate 6 * signed volume using tetrahedra formed with the origin
+    signed_vol_6 = 0.0
+
     for f in tris
         v1, v2, v3 = f[1], f[2], f[3]
-        
-        # Degenerate triangle check
+
+        # 1. Check for degenerate index triangles
         (v1 == v2 || v2 == v3 || v3 == v1) && return false
 
+        # 2. Record directed half-edges
         for (u, v) in ((v1, v2), (v2, v3), (v3, v1))
             half_edges[(u, v)] = get(half_edges, (u, v), 0) + 1
         end
+
+        # 3. Accumulate signed volume: dot(p1, cross(p2, p3))
+        p1, p2, p3 = pts[v1], pts[v2], pts[v3]
+        signed_vol_6 += dot(p1, cross(p2, p3))
     end
 
-    # Every directed edge (u, v) must appear once and have an exact opposite twin (v, u)
+    # 4. Verify watertightness AND consistent winding
+    # If every edge (u, v) has an exact opposite twin (v, u), all triangles are consistently oriented
     for ((u, v), count) in half_edges
         count != 1 && return false
         get(half_edges, (v, u), 0) != 1 && return false
     end
 
-    return true
+    # 5. Verify normals point outward (positive volume)
+    return signed_vol_6 > 0
 end
 
-function is_watertight(mesh::AbstractMesh)
-    tris = decompose(mesh.faces)
-    return is_watertight(tris)
+function is_valid(mesh::GeometryBasics.AbstractMesh)
+    return is_valid(mesh.position, mesh.faces)
 end
+
+
 
 """
     weld_vertices(pts::AbstractVector{PT}, tris::AbstractVector{<:TriangleFace}; 
