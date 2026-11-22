@@ -24,7 +24,6 @@ function main()
         )
     )
 
-    BOTTOMBAR = GridLayout(fig[2, 1], tellwidth = false, tellheight = true)
 
     fn_step = Observable(joinpath(pkgdir(@__MODULE__), "assets", "plate_with_ribs_2.step"))
     meshdata = lift(fn_step) do fn
@@ -144,15 +143,6 @@ function main()
 
     # 3. Build transparent yellow gate cylinders oriented along the nearest triangle normal
     # Track hovered / dragged gate index (0 = none) for visual highlight & interaction
-    # Disable WASD keyboard camera panning so 'a' and 'd' can add/delete gates
-    if hasproperty(cam.settings, :keyboard_translations)
-        cam.settings.keyboard_translations[] = false
-    elseif hasproperty(cam.settings, :key_controls)
-        cam.settings.key_controls[] = false
-    end
-    update_cam!(lscene.scene, cam)
-
-    # Track hovered / dragged gate index (0 = none)
     hovered_gate = Observable(0)
     dragged_gate = Ref(0)
 
@@ -340,9 +330,6 @@ function main()
     end
 
 
-    
-    # update_cam!(lscene.scene, cam)
-
     # 6. Keyboard Shortcuts on lscene.scene (priority = 20 intercepts before Camera3D)
     on(events(lscene.scene).keyboardbutton; priority = 20) do event
         event.action == Keyboard.press || return Consume(false)
@@ -375,40 +362,8 @@ function main()
         end
         return Consume(false)
     end
-    # on(events(fig).keyboardbutton; priority = 10) do event
-    #     event.action == Keyboard.press || return Consume(false)
-
-    #     if event.key == Keyboard.a
-    #         mp = events(fig).mouseposition[]
-    #         new_pos = pick_surface_point(mp)
-    #         if new_pos !== nothing
-    #             gts = copy(gates[])
-    #             default_r = isempty(gts) ? Float32(voxeldata[].voxel_spacing[1]) : gts[end].radius
-    #             push!(gts, ValveGate(position = new_pos, open_time = 0.0f0, radius = default_r))
-    #             gates[] = gts
-    #             hovered_gate[] = length(gts)
-    #         end
-    #         return Consume(true)
-    #     elseif event.key == Keyboard.d
-    #         gts = gates[]
-    #         if length(gts) > 1
-    #             mp = events(fig).mouseposition[]
-    #             target_idx = hovered_gate[] > 0 ? hovered_gate[] : find_near_gate(mp)
-    #             if 1 <= target_idx <= length(gts)
-    #                 new_gts = copy(gts)
-    #                 deleteat!(new_gts, target_idx)
-    #                 dragged_gate[] = 0
-    #                 gates[] = new_gts
-    #                 hovered_gate[] = find_near_gate(mp)
-    #             end
-    #         end
-    #         return Consume(true)
-    #     end
-    #     return Consume(false)
-    # end
 
     
-
     # 3. Dedicated Pixel-Space Overlay Scene (never occluded by 3D mesh depth)
     overlay_scene = Scene(fig.scene; clear = false, camera = campixel!)
 
