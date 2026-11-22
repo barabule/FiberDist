@@ -40,15 +40,25 @@ function main()
         mask_points(vd.grid, vd.voxel_spacing, vd.corner)
     end
 
+    
+
+    # Replace the `gates = lift(t2)` block with a directly mutable Observable:
     p1 = Point3f(0, 25, 0)
     p2 = Point3f(100, 25, 0)
     t2 = Observable(0.0)
 
-    gates = lift(t2) do t
-        [
-            ValveGate(position = p1, open_time = 0.0, radius = 2.0),
-            ValveGate(position = p2, open_time = t, radius = 2.0)
-        ]
+    gates = Observable([
+        ValveGate(position = p1, open_time = 0.0, radius = 2.0),
+        ValveGate(position = p2, open_time = t2[], radius = 2.0)
+    ])
+
+    on(t2) do t
+        gts = copy(gates[])
+        if length(gts) >= 2
+            g = gts[2]
+            gts[2] = ValveGate(position = g.position, open_time = t, radius = g.radius)
+            gates[] = gts
+        end
     end
 
     stats = lift(meshdata, voxeldata, gates) do md, vd, gts
@@ -103,6 +113,7 @@ function main()
         shading = true,
     )
 
+####################        Camera ############################
     # Orthographic CAD camera setup with zero near-plane clipping
     center!(lscene.scene)
     cam = cameracontrols(lscene.scene)
@@ -125,6 +136,240 @@ function main()
         end
     end
     update_cam!(lscene.scene, cam)
+
+#######################    Gates     ######################################
+
+    # 3. Build transparent yellow gate cylinders oriented along the nearest triangle normal
+    # Track hovered / dragged gate index (0 = none) for visual highlight & interaction
+    # Disable WASD keyboard camera panning so 'a' and 'd' can add/delete gates
+    if hasproperty(cam.settings, :keyboard_translations)
+        cam.settings.keyboard_translations[] = false
+    elseif hasproperty(cam.settings, :key_controls)
+        cam.settings.key_controls[] = false
+    end
+    update_cam!(lscene.scene, cam)
+
+    # Track hovered / dragged gate index (0 = none)
+    hovered_gate = Observable(0)
+    dragged_gate = Ref(0)
+
+    # 3. Build gate cylinders with per-vertex colors so ONLY the active gate highlights
+    gate_meshes = lift(gates, stats, voxeldata, hovered_gate) do gts, st, vd, h_idx
+        dx = Float32(vd.voxel_spacing[1])
+        centroids = st.centroids
+        normals   = st.normals
+
+        col_normal = RGBAf(1.0, 0.85, 0.0, 0.45)
+        col_active = RGBAf(1.0, 0.40, 0.0, 0.80)
+
+        all_pts   = Point3f[]
+        all_faces = GeometryBasics.TriangleFace{Int}[]
+        all_cols  = RGBAf[]
+
+        for (idx, g) in enumerate(gts)
+            pos = Point3f(g.position)
+            r   = max(Float32(g.radius), dx)
+            h   = max(3.0f0 * r, 3.0f0 * dx)
+
+            nearest_idx = argmin([sum(abs2, c - pos) for c in centroids])
+            n_dir = Vec3f(normals[nearest_idx])
+            n_len = sqrt(sum(abs2, n_dir))
+            n_hat = n_len > 1f-6 ? (n_dir / n_len) : Vec3f(0.0f0, 0.0f0, 1.0f0)
+
+            p_base = pos - 0.25f0 * dx * n_hat
+            p_tip  = pos + h * n_hat
+
+            cyl = GeometryBasics.Cylinder(p_base, p_tip, r)
+            m   = GeometryBasics.triangle_mesh(GeometryBasics.Tesselation(cyl, 32))
+
+            v_offset = length(all_pts)
+            m_pts    = GeometryBasics.coordinates(m)
+            m_faces  = GeometryBasics.faces(m)
+            c_gate   = (idx == h_idx) ? col_active : col_normal
+
+            append!(all_pts, m_pts)
+            append!(all_cols, fill(c_gate, length(m_pts)))
+            for f in m_faces
+                push!(all_faces, GeometryBasics.TriangleFace{Int}(
+                    f[1] + v_offset,
+                    f[2] + v_offset,
+                    f[3] + v_offset
+                ))
+            end
+        end
+
+        if isempty(all_pts)
+            m_empty = GeometryBasics.triangle_mesh(GeometryBasics.Tesselation(
+                GeometryBasics.Cylinder(Point3f(0), Point3f(0, 0, 1f-4), 1f-4), 8
+            ))
+            return GeometryBasics.normal_mesh(GeometryBasics.mesh(
+                GeometryBasics.coordinates(m_empty),
+                GeometryBasics.faces(m_empty);
+                color = fill(RGBAf(0, 0, 0, 0), length(GeometryBasics.coordinates(m_empty)))
+            ))
+        end
+
+        return GeometryBasics.normal_mesh(
+            GeometryBasics.mesh(all_pts, all_faces; color = all_cols)
+        )
+    end
+
+    gate_plot = mesh!(
+        lscene,
+        gate_meshes;
+        transparency = true,
+        shading = true,
+    )
+
+    # Helper: find nearest gate index within 1 gate radius (or min 18 px) of screen cursor `mp`
+    function find_near_gate(mp)
+        gts = gates[]
+        isempty(gts) && return 0
+
+        dx = Float32(voxeldata[].voxel_spacing[1])
+        vp_origin = Point2f(lscene.scene.viewport[].origin)
+        mouse_px = Point2f(mp[1], mp[2])
+        mouse_local = mouse_px - vp_origin
+
+        plt, _ = Makie.pick(lscene.scene, mouse_px)
+        hit_gate_mesh = (plt == gate_plot)
+
+        best_idx = 0
+        best_dist = Inf32
+
+        cam_view = cameracontrols(lscene.scene)
+        right_vec = Vec3f(normalize(cross(cam_view.lookat[] - cam_view.eyeposition[], cam_view.upvector[])))
+
+        for (idx, g) in enumerate(gts)
+            pos = Point3f(g.position)
+            r   = max(Float32(g.radius), dx)
+
+            p_scr = Point2f(Makie.project(lscene.scene, pos))
+            p_rad_scr = Point2f(Makie.project(lscene.scene, pos + r * right_vec))
+
+            r_px = max(norm(p_rad_scr - p_scr), 18.0f0)
+            d_px = norm(mouse_local - p_scr)
+
+            thresh = hit_gate_mesh ? max(r_px * 2.5f0, 45.0f0) : r_px
+            if d_px <= thresh && d_px < best_dist
+                best_dist = d_px
+                best_idx = idx
+            end
+        end
+        return best_idx
+    end
+
+    # Helper: raycast through gate cylinder onto the part surface mesh via Makie.pick
+    # Exact orthographic/perspective raycast from screen pixel -> Raycore BVH hit point
+    function pick_surface_point(mp)
+        vp = lscene.scene.viewport[]
+        # Convert window pixel coordinates to normalized device coordinates [-1, 1]
+        u = 2.0f0 * (Float32(mp[1]) - Float32(vp.origin[1])) / Float32(vp.widths[1]) - 1.0f0
+        v = 2.0f0 * (Float32(mp[2]) - Float32(vp.origin[2])) / Float32(vp.widths[2]) - 1.0f0
+        (-1.0f0 <= u <= 1.0f0 && -1.0f0 <= v <= 1.0f0) || return nothing
+
+        # Unproject near (z = -1) and far (z = +1) points through inverse projectionview
+        inv_pv = inv(lscene.scene.camera.projectionview[])
+        p_near_h = inv_pv * Vec4f(u, v, -1.0f0, 1.0f0)
+        p_far_h  = inv_pv * Vec4f(u, v,  1.0f0, 1.0f0)
+
+        p_near = Point3f(p_near_h[1], p_near_h[2], p_near_h[3]) / p_near_h[4]
+        p_far  = Point3f(p_far_h[1],  p_far_h[2],  p_far_h[3])  / p_far_h[4]
+
+        ray_vec = p_far - p_near
+        ray_len = norm(ray_vec)
+        ray_len > 1f-6 || return nothing
+
+        ray = Raycore.Ray(o = p_near, d = SVector{3, Float32}(ray_vec / ray_len))
+        hit_found, _, distance, _, _ = Raycore.closest_hit(meshdata[].tlas, ray)
+        hit_found || return nothing
+
+        return p_near + Float32(distance) * (ray_vec / ray_len)
+    end
+
+    # 4. Mouse Press / Release (priority = 10 intercepts left-drag before Camera3D orbits)
+    on(events(fig).mousebutton; priority = 10) do event
+        if event.button == Mouse.left
+            if event.action == Mouse.press
+                mp = events(fig).mouseposition[]
+                g_idx = find_near_gate(mp)
+                if g_idx > 0
+                    dragged_gate[] = g_idx
+                    hovered_gate[] = g_idx
+                    return Consume(true)
+                end
+            elseif event.action == Mouse.release
+                if dragged_gate[] > 0
+                    dragged_gate[] = 0
+                    hovered_gate[] = find_near_gate(events(fig).mouseposition[])
+                    return Consume(true)
+                end
+            end
+        end
+        return Consume(false)
+    end
+
+    # 5. Mouse Move (priority = 10 prevents Camera3D rotation while dragging a gate)
+    on(events(fig).mouseposition; priority = 10) do mp
+        g_drag = dragged_gate[]
+        if g_drag > 0 && ispressed(fig, Mouse.left)
+            new_pos = pick_surface_point(mp)
+            if new_pos !== nothing && 1 <= g_drag <= length(gates[])
+                gts = copy(gates[])
+                old_g = gts[g_drag]
+                if sum(abs2, Point3f(old_g.position) - new_pos) > 1f-6
+                    gts[g_drag] = ValveGate(
+                        position = new_pos,
+                        open_time = old_g.open_time,
+                        radius = old_g.radius
+                    )
+                    gates[] = gts
+                end
+            end
+            return Consume(true)
+        else
+            new_hover = find_near_gate(mp)
+            if hovered_gate[] != new_hover
+                hovered_gate[] = new_hover
+            end
+            return Consume(false)
+        end
+    end
+
+    # 6. Keyboard Shortcuts (priority = 10): 'a' adds gate on mesh, 'd' deletes hovered gate (min 1)
+    on(events(fig).keyboardbutton; priority = 10) do event
+        event.action == Keyboard.press || return Consume(false)
+
+        if event.key == Keyboard.a
+            mp = events(fig).mouseposition[]
+            new_pos = pick_surface_point(mp)
+            if new_pos !== nothing
+                gts = copy(gates[])
+                default_r = isempty(gts) ? Float32(voxeldata[].voxel_spacing[1]) : gts[end].radius
+                push!(gts, ValveGate(position = new_pos, open_time = 0.0f0, radius = default_r))
+                gates[] = gts
+                hovered_gate[] = length(gts)
+            end
+            return Consume(true)
+        elseif event.key == Keyboard.d
+            gts = gates[]
+            if length(gts) > 1
+                mp = events(fig).mouseposition[]
+                target_idx = hovered_gate[] > 0 ? hovered_gate[] : find_near_gate(mp)
+                if 1 <= target_idx <= length(gts)
+                    new_gts = copy(gts)
+                    deleteat!(new_gts, target_idx)
+                    dragged_gate[] = 0
+                    gates[] = new_gts
+                    hovered_gate[] = find_near_gate(mp)
+                end
+            end
+            return Consume(true)
+        end
+        return Consume(false)
+    end
+
+    
 
     # 3. Dedicated Pixel-Space Overlay Scene (never occluded by 3D mesh depth)
     overlay_scene = Scene(fig.scene; clear = false, camera = campixel!)
