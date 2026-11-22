@@ -28,7 +28,10 @@ end
 
     fn = "../assets/plate_with_ribs.step"
     meshdata = FD.load_step_mesh_as_surface(fn)
-    voxeldata = FD.VoxelData(meshdata)
+    voxeldata = FD.VoxelData(meshdata; fullres = true)
+    @test size(voxeldata.grid) == size(voxeldata.thickness)
+    # voxeldata = FD.VoxelData(meshdata; fullres = false)
+    # @test size(voxeldata.grid) == size(voxeldata.thickness)
     @test size(voxeldata.grid)[1] == 100
 
     wt = FD.wallthickness(voxeldata, 25)
@@ -39,6 +42,7 @@ end
 
     
     fill_time = FD.solve_eikonal_fim_ka(voxeldata, gates)
+    @info "fill_time", length(isfinite.(fill_time))
     @test true
 
     actual_fill_time = fill_time[isfinite.(fill_time)]

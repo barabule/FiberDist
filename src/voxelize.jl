@@ -11,6 +11,7 @@ Returns `(; grid, voxel_spacing, corner)`.
 """
 function VoxelData(
     meshdata::MeshData;
+    fullres = false, #if true the thickness is stored at full grid resolution, else at half res -> 1/8 the size!
     res::Integer = 100,       # resolution across longest axis
     padding::Real = 0.05      # relative padding to bounding box span
 )
@@ -94,7 +95,11 @@ function VoxelData(
     grid = voxel_grid
     voxel_spacing = (dx, dy, dz)
     corner = corner
-    thickness = compute_squared_thickness_u16(grid)
+    if fullres
+        thickness = compute_squared_thickness_u16(grid)
+    else
+        thickness = compute_halfres_thickness(grid)
+    end
     return VoxelData(grid, thickness, voxel_spacing, corner)
 end
 
@@ -300,6 +305,240 @@ function compute_squared_thickness_u16(voxel_grid)
 
     return thick_r_sq
 end
+
+
+
+"""
+    edt_1d_parabolic_strided!(f, d, v, z, n, stride::Int, inf_val::Int64)
+
+1D Felzenszwalb–Huttenlocher parabolic EDT where adjacent array elements are separated
+by `stride` fine-voxel units (so squared distance between index `p` and `q` is `(stride * (p - q))²`).
+"""
+function edt_1d_parabolic_strided!(
+    f::Vector{Int64},
+    d::Vector{Int64},
+    v::Vector{Int32},
+    z::Vector{Float64},
+    n::Int,
+    stride::Int,
+    inf_val::Int64
+)
+    s2 = Int64(stride) * Int64(stride)
+    inv_2s2 = 1.0 / (2.0 * Float64(s2))
+
+    k = 1
+    @inbounds begin
+        v[1] = Int32(1)
+        z[1] = -Inf
+        z[2] = Inf
+
+        for q in 2:n
+            fq = f[q]
+            fq >= inf_val && continue
+
+            vk = Int(v[k])
+            s = ((fq + s2 * Int64(q) * Int64(q)) - (f[vk] + s2 * Int64(vk) * Int64(vk))) * inv_2s2 / Float64(q - vk)
+            while s <= z[k]
+                k -= 1
+                vk = Int(v[k])
+                s = ((fq + s2 * Int64(q) * Int64(q)) - (f[vk] + s2 * Int64(vk) * Int64(vk))) * inv_2s2 / Float64(q - vk)
+            end
+            k += 1
+            v[k] = Int32(q)
+            z[k] = s
+            z[k + 1] = Inf
+        end
+
+        k = 1
+        for q in 1:n
+            while z[k + 1] < Float64(q)
+                k += 1
+            end
+            vk = Int(v[k])
+            diff = Int64(q - vk)
+            d[q] = s2 * diff * diff + f[vk]
+        end
+    end
+    return nothing
+end
+
+"""
+    compute_halfres_thickness(grid::BitArray{3}) -> HalfResThickness
+
+Computes 3D inscribed-sphere local thickness on a 1/2-resolution grid (`cld.(size(grid), 2)`)
+**without** dilating the solid mask:
+- Evaluates exact fine-grid boundary distances along X at full resolution, taking the minimum
+  over each 2×2 Y-Z fine fiber so thin walls are never overestimated.
+- Propagates Y and Z parabolic envelopes with `stride = 2` directly in fine squared-voxel units.
+- Runs Hildebrand–Rüegsegger ridge propagation on the 1/8-size coarse grid.
+"""
+function compute_halfres_thickness(grid::BitArray{3})
+    full_dims = size(grid)
+    fnx, fny, fnz = full_dims
+    cnx, cny, cnz = cld(fnx, 2), cld(fny, 2), cld(fnz, 2)
+
+    INF_SQ  = Int64(fnx)^2 + Int64(fny)^2 + Int64(fnz)^2 + Int64(1)
+    MAX_U16 = Int64(typemax(UInt16))
+
+    r_sq        = fill(typemax(UInt16), cnx, cny, cnz)
+    coarse_mask = falses(cnx, cny, cnz)
+
+    # Pass 1: Full-resolution X-EDT, strided into coarse (cnx, cny, cnz) without dilation
+    Threads.@threads for ck in 1:cnz
+        f = Vector{Int64}(undef, fnx)
+        d = Vector{Int64}(undef, fnx)
+        v = Vector{Int32}(undef, fnx)
+        z = Vector{Float64}(undef, fnx + 1)
+
+        k0, k1 = 2ck - 1, min(2ck, fnz)
+        @inbounds for cj in 1:cny
+            j0, j1 = 2cj - 1, min(2cj, fny)
+
+            # Initialize coarse cells to INF_SQ where any fine voxel in the 2x2x2 block is solid
+            for ci in 1:cnx
+                i0, i1 = 2ci - 1, min(2ci, fnx)
+                has_solid = false
+                for fk in k0:k1, fj in j0:j1, fi in i0:i1
+                    if grid[fi, fj, fk]
+                        has_solid = true
+                        break
+                    end
+                end
+                coarse_mask[ci, cj, ck] = has_solid
+                r_sq[ci, cj, ck] = has_solid ? typemax(UInt16) : UInt16(0)
+            end
+
+            # Scan all fine X-lines in this 2x2 Y-Z bundle and keep the tightest wall distance
+            for fk in k0:k1, fj in j0:j1
+                any_solid = false
+                for fi in 1:fnx
+                    if grid[fi, fj, fk]
+                        f[fi] = INF_SQ
+                        any_solid = true
+                    else
+                        f[fi] = Int64(0)
+                    end
+                end
+                if !any_solid
+                    for ci in 1:cnx
+                        r_sq[ci, cj, ck] = UInt16(0)
+                    end
+                    continue
+                end
+
+                edt_1d_parabolic_strided!(f, d, v, z, fnx, 1, INF_SQ)
+
+                for ci in 1:cnx
+                    coarse_mask[ci, cj, ck] || continue
+                    i0, i1 = 2ci - 1, min(2ci, fnx)
+                    # Take the max distance among the 2 fine X-voxels (captures centerline of thin X-walls)
+                    # while taking min across the 2x2 Y-Z fibers (never overestimates Y/Z walls)
+                    d_x = i1 > i0 ? max(d[i0], d[i1]) : d[i0]
+                    u_x = UInt16(clamp(d_x, Int64(0), MAX_U16))
+                    if u_x < r_sq[ci, cj, ck]
+                        r_sq[ci, cj, ck] = u_x
+                    end
+                end
+            end
+        end
+    end
+
+    # Pass 2: Y-axis on coarse grid with stride = 2 (in fine squared-voxel units)
+    Threads.@threads for ck in 1:cnz
+        f = Vector{Int64}(undef, cny)
+        d = Vector{Int64}(undef, cny)
+        v = Vector{Int32}(undef, cny)
+        z = Vector{Float64}(undef, cny + 1)
+
+        @inbounds for ci in 1:cnx
+            any_solid = false
+            for cj in 1:cny
+                val = Int64(r_sq[ci, cj, ck])
+                if val > 0
+                    f[cj] = val == MAX_U16 ? INF_SQ : val
+                    any_solid = true
+                else
+                    f[cj] = Int64(0)
+                end
+            end
+            any_solid || continue
+
+            edt_1d_parabolic_strided!(f, d, v, z, cny, 2, INF_SQ)
+            for cj in 1:cny
+                r_sq[ci, cj, ck] = UInt16(clamp(d[cj], Int64(0), MAX_U16))
+            end
+        end
+    end
+
+    # Pass 3: Z-axis on coarse grid with stride = 2 (in fine squared-voxel units)
+    Threads.@threads for cj in 1:cny
+        f = Vector{Int64}(undef, cnz)
+        d = Vector{Int64}(undef, cnz)
+        v = Vector{Int32}(undef, cnz)
+        z = Vector{Float64}(undef, cnz + 1)
+
+        @inbounds for ci in 1:cnx
+            any_solid = false
+            for ck in 1:cnz
+                val = Int64(r_sq[ci, cj, ck])
+                if val > 0
+                    f[ck] = val == MAX_U16 ? INF_SQ : val
+                    any_solid = true
+                else
+                    f[ck] = Int64(0)
+                end
+            end
+            any_solid || continue
+
+            edt_1d_parabolic_strided!(f, d, v, z, cnz, 2, INF_SQ)
+            for ck in 1:cnz
+                r_sq[ci, cj, ck] = UInt16(clamp(d[ck], Int64(0), MAX_U16))
+            end
+        end
+    end
+
+    # 4. Hildebrand–Rüegsegger ridge propagation (radius in coarse cells = ceil(sqrt(rsq) / 2))
+    thick_coarse = copy(r_sq)
+
+    @inbounds for ck in 2:(cnz - 1), cj in 2:(cny - 1), ci in 2:(cnx - 1)
+        rsq = Int64(r_sq[ci, cj, ck])
+        rsq <= 1 && continue
+
+        is_ridge = (rsq >= Int64(r_sq[ci-1, cj, ck]) && rsq >= Int64(r_sq[ci+1, cj, ck])) ||
+                   (rsq >= Int64(r_sq[ci, cj-1, ck]) && rsq >= Int64(r_sq[ci, cj+1, ck])) ||
+                   (rsq >= Int64(r_sq[ci, cj, ck-1]) && rsq >= Int64(r_sq[ci, cj, ck+1]))
+        is_ridge || continue
+
+        # Sphere radius in coarse grid units (each coarse step = 2 fine voxels)
+        rad_coarse = ceil(Int, sqrt(Float64(rsq)) * 0.5)
+        u_val = UInt16(clamp(rsq, Int64(0), MAX_U16))
+
+        for dk in -rad_coarse:rad_coarse
+            kk = ck + dk
+            (1 <= kk <= cnz) || continue
+            dk2 = 4 * dk * dk
+            for dj in -rad_coarse:rad_coarse
+                jj = cj + dj
+                (1 <= jj <= cny) || continue
+                djk2 = dk2 + 4 * dj * dj
+                djk2 > rsq && continue
+                for di in -rad_coarse:rad_coarse
+                    ii = ci + di
+                    (1 <= ii <= cnx) || continue
+                    if (djk2 + 4 * di * di) <= rsq && coarse_mask[ii, jj, kk]
+                        if u_val > thick_coarse[ii, jj, kk]
+                            thick_coarse[ii, jj, kk] = u_val
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return HalfResThickness(thick_coarse, full_dims)
+end
+
+
 
 
 # Locate nearest interior solid voxel to each gate coordinate via O(1) direct index
@@ -674,3 +913,6 @@ function gates_to_voxels(
     return gate_voxels
 end
 
+function KernelAbstractions.get_backend(A::FiberDist.HalfResThickness)
+    return KernelAbstractions.get_backend(A.data)
+end
