@@ -50,6 +50,10 @@ end
     @info "tmin = $tmin, tmax = $tmax"
     @test length(actual_fill_time) == sum(voxeldata.grid)
 
+
+
+
+
     meshproj = FD.project_voxel_to_mesh_triangles(
                     meshdata,
                     voxeldata,
@@ -63,6 +67,16 @@ end
     layered_fot = FD.compute_triangle_layered_fot(meshproj)
 
     @test size(layered_fot.layers.a11)[1] == length(meshdata.mesh.faces)
+
+    #half res
+    voxeldata = FD.VoxelData(meshdata; fullres = false)
+    @test size(voxeldata.grid) == size(voxeldata.thickness)
+    fill_time = FD.solve_eikonal_fim_ka(voxeldata, gates)
+    actual_fill_time = fill_time[isfinite.(fill_time)]
+    (tmin, tmax) = extrema(actual_fill_time)
+    @info "tmin = $tmin, tmax = $tmax"
+    @test length(actual_fill_time) == sum(voxeldata.grid)
+
 
 end
 

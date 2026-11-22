@@ -56,31 +56,32 @@ end
 
 
 """
-    HalfResThickness <: AbstractArray{UInt16, 3}
+    HalfResThickness{A<:AbstractArray{UInt16, 3}} <: AbstractArray{UInt16, 3}
 
-Stores squared voxel thickness at 1/2 resolution per axis (1/8 total elements = 2 bits
-per full-res voxel) and transparently reconstructs full-resolution values on `getindex`
-via exact dyadic {3/4, 1/4} integer trilinear interpolation (`>> 6`).
+Stores squared voxel thickness at 1/2 resolution per axis (1/8 total elements) and
+transparently reconstructs full-resolution values on `getindex` via exact dyadic
+`{3/4, 1/4}` integer trilinear interpolation (`>> 6`).
 """
-struct HalfResThickness <: AbstractArray{UInt16, 3}
-    data::Array{UInt16, 3}   # size = cld.(dims, 2), stored in fine squared-voxel units
-    dims::NTuple{3, Int}     # full-resolution grid dimensions
+struct HalfResThickness{A<:AbstractArray{UInt16, 3}} <: AbstractArray{UInt16, 3}
+    data::A
+    dims::NTuple{3, Int}
 end
 
 Base.size(A::HalfResThickness) = A.dims
 Base.IndexStyle(::Type{<:HalfResThickness}) = IndexCartesian()
+
+# Keep HalfResThickness compact when adapting to CPU() or GPU backends
+Adapt.adapt_structure(to, A::HalfResThickness) = HalfResThickness(Adapt.adapt(to, A.data), A.dims)
 
 @inline function Base.getindex(A::HalfResThickness, i::Int, j::Int, k::Int)::UInt16
     @boundscheck checkbounds(A, i, j, k)
     nx, ny, nz = size(A.data)
 
     @inbounds begin
-        # Coarse cell containing fine voxel (i, j, k)
         ic = (i + 1) >> 1
         jc = (j + 1) >> 1
         kc = (k + 1) >> 1
 
-        # Odd fine index -> neighbor is ic - 1; Even fine index -> neighbor is ic + 1
         inbr = clamp(ic + ifelse(isodd(i), -1, 1), 1, nx)
         jnbr = clamp(jc + ifelse(isodd(j), -1, 1), 1, ny)
         knbr = clamp(kc + ifelse(isodd(k), -1, 1), 1, nz)
@@ -97,7 +98,7 @@ Base.IndexStyle(::Type{<:HalfResThickness}) = IndexCartesian()
         acc = UInt32(27) * v000 +
               UInt32(9)  * (v100 + v010 + v001) +
               UInt32(3)  * (v110 + v101 + v011) +
-              v111 + UInt32(32) # +32 for nearest-integer rounding before >> 6
+              v111 + UInt32(32)
 
         return UInt16(acc >> 6)
     end

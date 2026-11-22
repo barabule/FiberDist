@@ -256,5 +256,5 @@ function solve_eikonal_fim_ka(
     voxel_spacing = voxeldata.voxel_spacing
     gate_voxels = gates_to_voxels(gates, voxeldata)
 
-    return solve_eikonal_fim_ka(voxel_grid, thick_r_sq, gate_voxels, voxel_spacing)
+    return solve_eikonal_fim_ka(voxel_grid, thick_r_sq, gate_voxels, voxel_spacing; kwargs...)
 end

@@ -361,17 +361,6 @@ function edt_1d_parabolic_strided!(
     end
     return nothing
 end
-
-"""
-    compute_halfres_thickness(grid::BitArray{3}) -> HalfResThickness
-
-Computes 3D inscribed-sphere local thickness on a 1/2-resolution grid (`cld.(size(grid), 2)`)
-**without** dilating the solid mask:
-- Evaluates exact fine-grid boundary distances along X at full resolution, taking the minimum
-  over each 2×2 Y-Z fine fiber so thin walls are never overestimated.
-- Propagates Y and Z parabolic envelopes with `stride = 2` directly in fine squared-voxel units.
-- Runs Hildebrand–Rüegsegger ridge propagation on the 1/8-size coarse grid.
-"""
 function compute_halfres_thickness(grid::BitArray{3})
     full_dims = size(grid)
     fnx, fny, fnz = full_dims
@@ -380,10 +369,11 @@ function compute_halfres_thickness(grid::BitArray{3})
     INF_SQ  = Int64(fnx)^2 + Int64(fny)^2 + Int64(fnz)^2 + Int64(1)
     MAX_U16 = Int64(typemax(UInt16))
 
-    r_sq        = fill(typemax(UInt16), cnx, cny, cnz)
+    r_sq        = zeros(UInt16, cnx, cny, cnz)
     coarse_mask = falses(cnx, cny, cnz)
 
-    # Pass 1: Full-resolution X-EDT, strided into coarse (cnx, cny, cnz) without dilation
+    # Pass 1: Full-resolution X-EDT, strided into coarse (cnx, cny, cnz)
+    # Only solid fine voxels contribute to solid coarse cells (never zeroed by adjacent air)
     Threads.@threads for ck in 1:cnz
         f = Vector{Int64}(undef, fnx)
         d = Vector{Int64}(undef, fnx)
@@ -394,7 +384,6 @@ function compute_halfres_thickness(grid::BitArray{3})
         @inbounds for cj in 1:cny
             j0, j1 = 2cj - 1, min(2cj, fny)
 
-            # Initialize coarse cells to INF_SQ where any fine voxel in the 2x2x2 block is solid
             for ci in 1:cnx
                 i0, i1 = 2ci - 1, min(2ci, fnx)
                 has_solid = false
@@ -408,7 +397,6 @@ function compute_halfres_thickness(grid::BitArray{3})
                 r_sq[ci, cj, ck] = has_solid ? typemax(UInt16) : UInt16(0)
             end
 
-            # Scan all fine X-lines in this 2x2 Y-Z bundle and keep the tightest wall distance
             for fk in k0:k1, fj in j0:j1
                 any_solid = false
                 for fi in 1:fnx
@@ -419,22 +407,23 @@ function compute_halfres_thickness(grid::BitArray{3})
                         f[fi] = Int64(0)
                     end
                 end
-                if !any_solid
-                    for ci in 1:cnx
-                        r_sq[ci, cj, ck] = UInt16(0)
-                    end
-                    continue
-                end
+                any_solid || continue
 
                 edt_1d_parabolic_strided!(f, d, v, z, fnx, 1, INF_SQ)
 
                 for ci in 1:cnx
                     coarse_mask[ci, cj, ck] || continue
                     i0, i1 = 2ci - 1, min(2ci, fnx)
-                    # Take the max distance among the 2 fine X-voxels (captures centerline of thin X-walls)
-                    # while taking min across the 2x2 Y-Z fibers (never overestimates Y/Z walls)
-                    d_x = i1 > i0 ? max(d[i0], d[i1]) : d[i0]
-                    u_x = UInt16(clamp(d_x, Int64(0), MAX_U16))
+
+                    # Only consider solid fine voxels in [i0, i1] so air neighbors don't write 0
+                    s0 = grid[i0, fj, fk]
+                    s1 = (i1 > i0) && grid[i1, fj, fk]
+                    (s0 || s1) || continue
+
+                    d_x = (s0 && s1) ? max(d[i0], d[i1]) :
+                          s0         ? d[i0] : d[i1]
+
+                    u_x = UInt16(clamp(max(d_x, Int64(1)), Int64(1), MAX_U16))
                     if u_x < r_sq[ci, cj, ck]
                         r_sq[ci, cj, ck] = u_x
                     end
@@ -453,8 +442,8 @@ function compute_halfres_thickness(grid::BitArray{3})
         @inbounds for ci in 1:cnx
             any_solid = false
             for cj in 1:cny
-                val = Int64(r_sq[ci, cj, ck])
-                if val > 0
+                if coarse_mask[ci, cj, ck]
+                    val = Int64(r_sq[ci, cj, ck])
                     f[cj] = val == MAX_U16 ? INF_SQ : val
                     any_solid = true
                 else
@@ -465,7 +454,9 @@ function compute_halfres_thickness(grid::BitArray{3})
 
             edt_1d_parabolic_strided!(f, d, v, z, cny, 2, INF_SQ)
             for cj in 1:cny
-                r_sq[ci, cj, ck] = UInt16(clamp(d[cj], Int64(0), MAX_U16))
+                if coarse_mask[ci, cj, ck]
+                    r_sq[ci, cj, ck] = UInt16(clamp(max(d[cj], Int64(1)), Int64(1), MAX_U16))
+                end
             end
         end
     end
@@ -480,8 +471,8 @@ function compute_halfres_thickness(grid::BitArray{3})
         @inbounds for ci in 1:cnx
             any_solid = false
             for ck in 1:cnz
-                val = Int64(r_sq[ci, cj, ck])
-                if val > 0
+                if coarse_mask[ci, cj, ck]
+                    val = Int64(r_sq[ci, cj, ck])
                     f[ck] = val == MAX_U16 ? INF_SQ : val
                     any_solid = true
                 else
@@ -492,12 +483,14 @@ function compute_halfres_thickness(grid::BitArray{3})
 
             edt_1d_parabolic_strided!(f, d, v, z, cnz, 2, INF_SQ)
             for ck in 1:cnz
-                r_sq[ci, cj, ck] = UInt16(clamp(d[ck], Int64(0), MAX_U16))
+                if coarse_mask[ci, cj, ck]
+                    r_sq[ci, cj, ck] = UInt16(clamp(max(d[ck], Int64(1)), Int64(1), MAX_U16))
+                end
             end
         end
     end
 
-    # 4. Hildebrand–Rüegsegger ridge propagation (radius in coarse cells = ceil(sqrt(rsq) / 2))
+    # 4. Hildebrand–Rüegsegger ridge propagation (each coarse step = 2 fine voxels)
     thick_coarse = copy(r_sq)
 
     @inbounds for ck in 2:(cnz - 1), cj in 2:(cny - 1), ci in 2:(cnx - 1)
@@ -509,9 +502,8 @@ function compute_halfres_thickness(grid::BitArray{3})
                    (rsq >= Int64(r_sq[ci, cj, ck-1]) && rsq >= Int64(r_sq[ci, cj, ck+1]))
         is_ridge || continue
 
-        # Sphere radius in coarse grid units (each coarse step = 2 fine voxels)
         rad_coarse = ceil(Int, sqrt(Float64(rsq)) * 0.5)
-        u_val = UInt16(clamp(rsq, Int64(0), MAX_U16))
+        u_val = UInt16(clamp(rsq, Int64(1), MAX_U16))
 
         for dk in -rad_coarse:rad_coarse
             kk = ck + dk
