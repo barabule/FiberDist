@@ -115,11 +115,14 @@ function main()
 
 ####################        Camera ############################
     # Orthographic CAD camera setup with zero near-plane clipping
+
     center!(lscene.scene)
     cam = cameracontrols(lscene.scene)
     cam.settings.projectiontype[] = Makie.Orthographic
     cam.settings.cad[] = true
     cam.settings.zoom_shift_lookat[] = true
+    cam.controls.left_key[] = false
+    cam.controls.right_key[] = false
 
     # Prevent Makie's update_cam! from overriding near/far with aggressive positive clipping
     if hasproperty(cam.settings, :near_clip)
@@ -336,8 +339,12 @@ function main()
         end
     end
 
-    # 6. Keyboard Shortcuts (priority = 10): 'a' adds gate on mesh, 'd' deletes hovered gate (min 1)
-    on(events(fig).keyboardbutton; priority = 10) do event
+
+    
+    # update_cam!(lscene.scene, cam)
+
+    # 6. Keyboard Shortcuts on lscene.scene (priority = 20 intercepts before Camera3D)
+    on(events(lscene.scene).keyboardbutton; priority = 20) do event
         event.action == Keyboard.press || return Consume(false)
 
         if event.key == Keyboard.a
@@ -368,6 +375,37 @@ function main()
         end
         return Consume(false)
     end
+    # on(events(fig).keyboardbutton; priority = 10) do event
+    #     event.action == Keyboard.press || return Consume(false)
+
+    #     if event.key == Keyboard.a
+    #         mp = events(fig).mouseposition[]
+    #         new_pos = pick_surface_point(mp)
+    #         if new_pos !== nothing
+    #             gts = copy(gates[])
+    #             default_r = isempty(gts) ? Float32(voxeldata[].voxel_spacing[1]) : gts[end].radius
+    #             push!(gts, ValveGate(position = new_pos, open_time = 0.0f0, radius = default_r))
+    #             gates[] = gts
+    #             hovered_gate[] = length(gts)
+    #         end
+    #         return Consume(true)
+    #     elseif event.key == Keyboard.d
+    #         gts = gates[]
+    #         if length(gts) > 1
+    #             mp = events(fig).mouseposition[]
+    #             target_idx = hovered_gate[] > 0 ? hovered_gate[] : find_near_gate(mp)
+    #             if 1 <= target_idx <= length(gts)
+    #                 new_gts = copy(gts)
+    #                 deleteat!(new_gts, target_idx)
+    #                 dragged_gate[] = 0
+    #                 gates[] = new_gts
+    #                 hovered_gate[] = find_near_gate(mp)
+    #             end
+    #         end
+    #         return Consume(true)
+    #     end
+    #     return Consume(false)
+    # end
 
     
 
@@ -526,6 +564,276 @@ function main()
             end
         end
     end
+
+    ########################   OVERLAYS     ##############################################
+# --- C. Floating Overlays Panel (below Colorbar on the right) ---
+    show_flow_dirs  = Observable(false)
+    show_weld_lines = Observable(true)
+    show_air_traps  = Observable(true)
+
+    panel_w = card_w + 26
+    panel_h = 150
+
+    panel_card_rect = lift(lscene.scene.viewport, cb_card_rect) do vp, cb_rect
+        x0 = vp.origin[1] + vp.widths[1] - panel_w - 14
+        y0 = cb_rect.origin[2] - panel_h - 12
+        Rect2f(x0, y0, panel_w, panel_h)
+    end
+
+    poly!(
+        overlay_scene,
+        panel_card_rect,
+        color = RGBAf(1.0, 1.0, 1.0, 0.88),
+        strokecolor = RGBAf(0.5, 0.5, 0.5, 0.4),
+        strokewidth = 1.0,
+        overdraw = true,
+    )
+
+    panel_title_pos = @lift(Point2f(
+        $panel_card_rect.origin[1] + 12,
+        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 18
+    ))
+
+    text!(
+        overlay_scene,
+        panel_title_pos;
+        text = "Overlays",
+        fontsize = 13,
+        font = :bold,
+        color = :gray15,
+        align = (:left, :center),
+        overdraw = true,
+    )
+
+    # 1) Flow Direction Checkbox
+    chk_flow_bbox = @lift(BBox(
+        $panel_card_rect.origin[1] + 12,
+        $panel_card_rect.origin[1] + 30,
+        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 52,
+        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 34
+    ))
+
+    chk_flow_lbl_pos = @lift(Point2f(
+        $panel_card_rect.origin[1] + 36,
+        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 43
+    ))
+
+    chk_flow = Checkbox(
+        overlay_scene;
+        bbox = chk_flow_bbox,
+        checked = show_flow_dirs[],
+        tellwidth = false,
+        tellheight = false,
+    )
+    on(chk_flow.checked) do val
+        show_flow_dirs[] = val
+    end
+    set_overdraw_recursive!(chk_flow.blockscene)
+
+    text!(
+        overlay_scene,
+        chk_flow_lbl_pos;
+        text = "Flow Direction",
+        fontsize = 12,
+        color = :gray20,
+        align = (:left, :center),
+        overdraw = true,
+    )
+
+    # 2) Weld Lines Checkbox
+    chk_weld_bbox = @lift(BBox(
+        $panel_card_rect.origin[1] + 12,
+        $panel_card_rect.origin[1] + 30,
+        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 80,
+        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 62
+    ))
+
+    chk_weld_lbl_pos = @lift(Point2f(
+        $panel_card_rect.origin[1] + 36,
+        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 71
+    ))
+
+    chk_weld = Checkbox(
+        overlay_scene;
+        bbox = chk_weld_bbox,
+        checked = show_weld_lines[],
+        tellwidth = false,
+        tellheight = false,
+    )
+    on(chk_weld.checked) do val
+        show_weld_lines[] = val
+    end
+    set_overdraw_recursive!(chk_weld.blockscene)
+
+    text!(
+        overlay_scene,
+        chk_weld_lbl_pos;
+        text = "Weld Lines",
+        fontsize = 12,
+        color = :gray20,
+        align = (:left, :center),
+        overdraw = true,
+    )
+
+    # 3) Air Traps Checkbox
+    chk_air_bbox = @lift(BBox(
+        $panel_card_rect.origin[1] + 12,
+        $panel_card_rect.origin[1] + 30,
+        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 108,
+        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 90
+    ))
+
+    chk_air_lbl_pos = @lift(Point2f(
+        $panel_card_rect.origin[1] + 36,
+        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 99
+    ))
+
+    chk_air = Checkbox(
+        overlay_scene;
+        bbox = chk_air_bbox,
+        checked = show_air_traps[],
+        tellwidth = false,
+        tellheight = false,
+    )
+    on(chk_air.checked) do val
+        show_air_traps[] = val
+    end
+    set_overdraw_recursive!(chk_air.blockscene)
+
+    text!(
+        overlay_scene,
+        chk_air_lbl_pos;
+        text = "Air Traps",
+        fontsize = 12,
+        color = :gray20,
+        align = (:left, :center),
+        overdraw = true,
+    )
+
+    # --- D. 3D Flow Direction Line Segments ---
+    flow_segments = lift(stats, voxeldata, show_flow_dirs) do st, vd, visible
+        pts = Point3f[]
+        visible || return pts
+
+        dx = Float32(vd.voxel_spacing[1])
+        normal_offset = 0.08f0 * dx
+        half_len      = 0.35f0 * dx
+
+        centroids = st.centroids
+        normals   = st.normals
+        flow_dirs = st.flow_dir
+
+        sizehint!(pts, 2 * length(centroids))
+        @inbounds for i in eachindex(centroids)
+            u = flow_dirs[i]
+            u_norm2 = sum(abs2, u)
+            u_norm2 > 1f-6 || continue
+
+            n = normals[i]
+            p_mid = Point3f(centroids[i] + normal_offset * n)
+            step_vec = Vec3f((half_len / sqrt(u_norm2)) * u)
+
+            push!(pts, p_mid - step_vec)
+            push!(pts, p_mid + step_vec)
+        end
+        return pts
+    end
+
+    linesegments!(
+        lscene,
+        flow_segments;
+        color = RGBAf(0.08, 0.08, 0.08, 0.85),
+        linewidth = 1.2,
+        visible = show_flow_dirs,
+    )
+
+
+
+
+    # --- E. 3D Weld Line Segments (oriented along seam tangent n × u) ---
+    weld_segments = lift(stats, voxeldata, show_weld_lines) do st, vd, visible
+        pts = Point3f[]
+        visible || return pts
+
+        dx = Float32(vd.voxel_spacing[1])
+        normal_offset = 0.12f0 * dx  # slightly above flow lines to avoid z-fighting
+        half_len      = 0.55f0 * dx
+
+        centroids = st.centroids
+        normals   = st.normals
+        flow_dirs = st.flow_dir
+        weld_mask = st.masks.weld_lines
+
+        @inbounds for i in eachindex(centroids)
+            weld_mask[i] || continue
+
+            n = normals[i]
+            u = flow_dirs[i]
+
+            # Weld seam runs tangent to the surface and perpendicular to the colliding flow
+            t_seam = cross(n, u)
+            t_norm2 = sum(abs2, t_seam)
+
+            # Fallback if u is parallel to n: pick any tangent perpendicular to n
+            if t_norm2 <= 1f-6
+                ref = abs(n[1]) < 0.9f0 ? SVector{3, Float32}(1f0, 0f0, 0f0) : SVector{3, Float32}(0f0, 1f0, 0f0)
+                t_seam = cross(n, ref)
+                t_norm2 = sum(abs2, t_seam)
+            end
+            t_norm2 > 1f-6 || continue
+
+            p_mid = Point3f(centroids[i] + normal_offset * n)
+            step_vec = Vec3f((half_len / sqrt(t_norm2)) * t_seam)
+
+            push!(pts, p_mid - step_vec)
+            push!(pts, p_mid + step_vec)
+        end
+        return pts
+    end
+
+    linesegments!(
+        lscene,
+        weld_segments;
+        color = RGBAf(1.0, 0.88, 0.0, 0.95),
+        linewidth = 3.5,
+        visible = show_weld_lines,
+    )
+
+
+    # --- F. 3D Air Trap Spheres (semi-transparent red markers on air-trap triangles) ---
+    air_trap_pts = lift(stats, voxeldata, show_air_traps) do st, vd, visible
+        pts = Point3f[]
+        visible || return pts
+
+        dx = Float32(vd.voxel_spacing[1])
+        normal_offset = 0.15f0 * dx
+
+        centroids = st.centroids
+        normals   = st.normals
+        air_mask  = st.masks.air_traps
+
+        @inbounds for i in eachindex(centroids)
+            air_mask[i] || continue
+            push!(pts, Point3f(centroids[i] + normal_offset * normals[i]))
+        end
+        return pts
+    end
+
+    air_trap_radius = @lift(0.65f0 * Float32($voxeldata.voxel_spacing[1]))
+
+    meshscatter!(
+        lscene,
+        air_trap_pts;
+        marker = GeometryBasics.Sphere(Point3f(0), 1.0f0),
+        markersize = air_trap_radius,
+        color = RGBAf(0.95, 0.12, 0.12, 0.55),
+        transparency = true,
+        shading = true,
+        visible = show_air_traps,
+    )
+
+
+
 
     return fig
 end
