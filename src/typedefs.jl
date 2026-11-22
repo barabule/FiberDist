@@ -60,7 +60,8 @@ end
 
 Stores squared voxel thickness at 1/2 resolution per axis (1/8 total elements) and
 transparently reconstructs full-resolution values on `getindex` via exact dyadic
-`{3/4, 1/4}` integer trilinear interpolation (`>> 6`).
+`{3/4, 1/4}` integer trilinear interpolation (`>> 6`), clamped to a minimum of `1`
+so 1-voxel-thick ribs or boundary neighbors never return `0` in Eikonal stencils.
 """
 struct HalfResThickness{A<:AbstractArray{UInt16, 3}} <: AbstractArray{UInt16, 3}
     data::A
@@ -70,8 +71,9 @@ end
 Base.size(A::HalfResThickness) = A.dims
 Base.IndexStyle(::Type{<:HalfResThickness}) = IndexCartesian()
 
-# Keep HalfResThickness compact when adapting to CPU() or GPU backends
+# Keep HalfResThickness compact when adapting to CPU() or GPU backends and preserve backend inference
 Adapt.adapt_structure(to, A::HalfResThickness) = HalfResThickness(Adapt.adapt(to, A.data), A.dims)
+KernelAbstractions.get_backend(A::HalfResThickness) = KernelAbstractions.get_backend(A.data)
 
 @inline function Base.getindex(A::HalfResThickness, i::Int, j::Int, k::Int)::UInt16
     @boundscheck checkbounds(A, i, j, k)
@@ -100,7 +102,7 @@ Adapt.adapt_structure(to, A::HalfResThickness) = HalfResThickness(Adapt.adapt(to
               UInt32(3)  * (v110 + v101 + v011) +
               v111 + UInt32(32)
 
-        return UInt16(acc >> 6)
+        return max(UInt16(1), UInt16(acc >> 6))
     end
 end
 

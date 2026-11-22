@@ -32,27 +32,21 @@ function main()
 
     gates = lift(t2) do t
         [
-            ValveGate(p1, 0.0),
-            ValveGate(p2, t)
+            ValveGate(position = p1, open_time = 0.0, radius = 2.0),
+            ValveGate(position = p2, open_time = t, radius = 2.0)
         ]
     end
 
-    thickness_field = lift(voxeldata) do vd
-        compute_squared_thickness_u16(vd)
+    stats = lift(meshdata, voxeldata, gates) do md, vd, gts
+        filltime = solve_eikonal_fim_ka(voxeldata, gates)
+        project_voxel_to_mesh_triangles( md, vd, filltime)
     end
 
-    fill_time = lift(voxeldata, thickness_field, gates) do vd, tf, gt
-        solve_eikonal_voxel(vd, tf, gt)
-    end
+    fill_time = list(meshdata, stats) do md, st
 
-    stats = lift(fill_time, voxeldata, thickness_field) do ft, vd, tf
-        analyze_eikonal_field(ft, vd, tf)
     end
 
 
-    vcolor = lift(fill_time, voxeldata, meshdata) do ft, vd, md
-        project_voxel_to_mesh_vertex(md, vd, ft)
-    end
 
     num_color_bands = Observable(16)
     cmap_name = Observable(:turbo)

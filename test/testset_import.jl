@@ -6,7 +6,7 @@
     fn = "../assets/plate_with_ribs.step"
     meshdata = FD.load_step_mesh_as_surface(fn)
     @test FD.is_valid(meshdata.mesh)
-
+    @test FD.is_valid(meshdata.mesh)
 end
 
 @testset "STL import" verbose = true begin
@@ -14,6 +14,8 @@ end
     meshdata = FD.MeshData(fn)
     @test FD.is_valid(meshdata.mesh)
     @test hasproperty(meshdata, :tlas)
+    @test hasproperty(meshdata, :adj)
+    @test FD.is_valid(meshdata.mesh)
 end
 
 @testset "MeshData" verbose = true begin
@@ -32,7 +34,7 @@ end
     @test size(voxeldata.grid) == size(voxeldata.thickness)
     # voxeldata = FD.VoxelData(meshdata; fullres = false)
     # @test size(voxeldata.grid) == size(voxeldata.thickness)
-    @test size(voxeldata.grid)[1] == 100
+    @test size(voxeldata.grid)[1] >= 100
 
     wt = FD.wallthickness(voxeldata, 25)
     wt2 = FD.wallthickness(voxeldata, 12, 4, 5)
@@ -80,8 +82,259 @@ end
 
 end
 
+@testset "Stepped Plate Fill Time, Projection & FOT" verbose = true begin
+    # 1. Build a 50x50 stepped plate in Gmsh:
+    #    - Thin half:  x ∈ [-25, 0], y ∈ [0, 50], z ∈ [0, 2]  (thickness = 2.0)
+    #    - Thick half: x ∈ [0, 25],  y ∈ [0, 50], z ∈ [0, 4]  (thickness = 4.0)
+    pts   = FD.Point3f[]
+    faces = FD.TriangleFace{Int}[]
+
+    gmsh = FD.Gmsh.gmsh
+    did_init = gmsh.isInitialized() == 0
+    did_init && gmsh.initialize()
+    try
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("stepped_plate")
+
+        occ = gmsh.model.occ
+        b_thin  = occ.addBox(-25.0, 0.0, 0.0, 25.0, 50.0, 2.0)
+        b_thick = occ.addBox(  0.0, 0.0, 0.0, 25.0, 50.0, 4.0)
+
+        # Fuse so the shared interface at x = 0 is conformal and watertight
+        occ.fuse([(3, b_thin)], [(3, b_thick)])
+        occ.synchronize()
+
+        gmsh.option.setNumber("Mesh.MeshSizeMin", 1.5)
+        gmsh.option.setNumber("Mesh.MeshSizeMax", 2.5)
+        gmsh.model.mesh.generate(2)
+
+        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+        tag_to_idx = Dict{UInt64, Int}(t => i for (i, t) in enumerate(node_tags))
+        resize!(pts, length(node_tags))
+        for i in eachindex(node_tags)
+            pts[i] = FD.Point3f(node_coords[3i - 2], node_coords[3i - 1], node_coords[3i])
+        end
+
+        elem_types, _, elem_node_tags = gmsh.model.mesh.getElements(2)
+        for (etype, enodes) in zip(elem_types, elem_node_tags)
+            etype == 2 || continue
+            for k in 1:3:length(enodes)
+                push!(faces, FD.TriangleFace{Int}(
+                    tag_to_idx[enodes[k]],
+                    tag_to_idx[enodes[k + 1]],
+                    tag_to_idx[enodes[k + 2]]
+                ))
+            end
+        end
+        gmsh.model.remove()
+    finally
+        did_init && gmsh.finalize()
+    end
+
+    mesh     = FD.normal_mesh(pts, faces)
+    meshdata = FD.MeshData(mesh)
+    n_faces  = length(meshdata.mesh.faces)
+
+    # Precompute CSR adjacency once and reuse across fullres = true/false runs
+    adj = FD.MeshAdjacency(meshdata.mesh)
+
+    function world_to_voxel(vd, p)
+        dx, dy, dz = vd.voxel_spacing
+        cx, cy, cz = vd.corner
+        ix = clamp(round(Int, (p[1] - cx) / dx + 0.5), 1, size(vd.grid, 1))
+        iy = clamp(round(Int, (p[2] - cy) / dy + 0.5), 1, size(vd.grid, 2))
+        iz = clamp(round(Int, (p[3] - cz) / dz + 0.5), 1, size(vd.grid, 3))
+        return (ix, iy, iz)
+    end
+
+    nearest_tri(centroids, target) = argmin([sum(abs2, c - target) for c in centroids])
+
+    @testset "Resolution (fullres = $fullres)" for fullres in (true, false)
+        voxeldata = FD.VoxelData(meshdata; fullres = fullres)
+        @test size(voxeldata.grid) == size(voxeldata.thickness)
+
+        # Gate at the middle of the 50x50 plate (x = 0, y = 25, z = 1.0)
+        gates = [FD.ValveGate(position = FD.Point3f(0.0f0, 25.0f0, 1.0f0), radius = 2.0f0)]
+
+        # 2. Verify interior voxel wall thickness on thin vs. thick sides
+        ix_thin,  iy_mid, iz_thin  = world_to_voxel(voxeldata, (-15.0f0, 25.0f0, 1.0f0))
+        ix_thick, _,      iz_thick = world_to_voxel(voxeldata, ( 15.0f0, 25.0f0, 2.0f0))
+
+        @test voxeldata.grid[ix_thin, iy_mid, iz_thin]
+        @test voxeldata.grid[ix_thick, iy_mid, iz_thick]
+
+        wt_thin  = FD.wallthickness(voxeldata, ix_thin,  iy_mid, iz_thin)
+        wt_thick = FD.wallthickness(voxeldata, ix_thick, iy_mid, iz_thick)
+        @info "fullres=$fullres | voxel wt_thin = $wt_thin (~2.0), wt_thick = $wt_thick (~4.0)"
+
+        @test wt_thick > 1.5 * wt_thin
+        @test isapprox(wt_thin,  2.0; rtol = 0.25)
+        @test isapprox(wt_thick, 4.0; rtol = 0.25)
+
+        # 3. Solve Eikonal fill time and check interior corner arrival times
+        fill_time = FD.solve_eikonal_fim_ka(voxeldata, gates)
+        actual_fill_time = fill_time[isfinite.(fill_time)]
+        @test length(actual_fill_time) == sum(voxeldata.grid)
+
+        c_thin  = world_to_voxel(voxeldata, (-23.0f0, 48.0f0, 1.0f0))
+        c_thick = world_to_voxel(voxeldata, ( 23.0f0, 48.0f0, 2.0f0))
+
+        t_vox_thin  = fill_time[c_thin...]
+        t_vox_thick = fill_time[c_thick...]
+        @info "fullres=$fullres | voxel t_thin = $t_vox_thin, t_thick = $t_vox_thick (ratio = $(t_vox_thin / t_vox_thick))"
+
+        @test isfinite(t_vox_thin) && isfinite(t_vox_thick)
+        @test t_vox_thick < t_vox_thin
+        @test (t_vox_thin / t_vox_thick) > 2.5
+
+        # 4. Project voxel fields onto surface mesh triangles
+        meshproj = FD.project_voxel_to_mesh_triangles(
+            meshdata,
+            voxeldata,
+            fill_time;
+        )
+
+        @test length(meshproj.centroids) == n_faces
+        @test length(meshproj.normals) == n_faces
+        @test all(isfinite, meshproj.fill_time)
+
+        # Query triangles on the bottom face (z = 0) near the symmetric far corners
+        tri_corner_thin  = nearest_tri(meshproj.centroids, FD.SVector{3, Float32}(-23.5f0, 48.5f0, 0.0f0))
+        tri_corner_thick = nearest_tri(meshproj.centroids, FD.SVector{3, Float32}( 23.5f0, 48.5f0, 0.0f0))
+
+        t_tri_thin  = meshproj.fill_time[tri_corner_thin]
+        t_tri_thick = meshproj.fill_time[tri_corner_thick]
+        h_tri_thin  = meshproj.thickness[tri_corner_thin]
+        h_tri_thick = meshproj.thickness[tri_corner_thick]
+        @info "fullres=$fullres | tri t_thin = $t_tri_thin, t_thick = $t_tri_thick (ratio = $(t_tri_thin / t_tri_thick))"
+
+        @test isfinite(t_tri_thin) && isfinite(t_tri_thick)
+        @test t_tri_thick < t_tri_thin
+        @test (t_tri_thin / t_tri_thick) > 2.5
+        @test h_tri_thick > 1.5 * h_tri_thin
+
+        # Flow vectors on the bottom plate should lie in the XY plane (|u_z| ≈ 0)
+        u_thin  = meshproj.flow_dir[tri_corner_thin]
+        u_thick = meshproj.flow_dir[tri_corner_thick]
+        @test isapprox(FD.norm(u_thin),  1.0f0; atol = 1f-4)
+        @test isapprox(FD.norm(u_thick), 1.0f0; atol = 1f-4)
+        @test abs(u_thin[3])  < 1f-3
+        @test abs(u_thick[3]) < 1f-3
+
+        # 5. Compute N-layer through-thickness 5-component FOT and verify invariants
+        n_layers = 10
+        layered_fot = FD.compute_triangle_layered_fot(meshproj; n_layers = n_layers)
+
+        @test size(layered_fot.layers.a11) == (n_faces, n_layers)
+        @test length(layered_fot.shell_avg.a11) == n_faces
+
+        for idx in (tri_corner_thin, tri_corner_thick)
+            a11_avg = layered_fot.shell_avg.a11[idx]
+            a22_avg = layered_fot.shell_avg.a22[idx]
+            a33_avg = FD.get_a33(a11_avg, a22_avg)
+            @test isapprox(a11_avg + a22_avg + a33_avg, 1.0f0; atol = 1f-5)
+            @test a33_avg < 0.12f0
+
+            e1 = meshproj.flow_dir[idx]
+            A_skin_11 = layered_fot.layers.a11[idx, end]
+            A_skin_22 = layered_fot.layers.a22[idx, end]
+            A_skin_12 = layered_fot.layers.a12[idx, end]
+            a_flow_skin = A_skin_11 * e1[1]^2 + A_skin_22 * e1[2]^2 + 2.0f0 * A_skin_12 * e1[1] * e1[2]
+            @test a_flow_skin > 0.75f0
+        end
+    end
+end
+
 
 @testset "Extrapolate" verbose = true begin
+    # Watertight, non-degenerate icosahedron (12 vertices, 20 equilateral faces)
+    ϕ = (1.0f0 + sqrt(5.0f0)) / 2.0f0
+    verts = FD.Point3f[
+        (-1,  ϕ,  0), ( 1,  ϕ,  0), (-1, -ϕ,  0), ( 1, -ϕ,  0),
+        ( 0, -1,  ϕ), ( 0,  1,  ϕ), ( 0, -1, -ϕ), ( 0,  1, -ϕ),
+        ( ϕ,  0, -1), ( ϕ,  0,  1), (-ϕ,  0, -1), (-ϕ,  0,  1)
+    ]
+    faces = FD.TriangleFace{Int}[
+        (1, 12,  6), (1,  6,  2), (1,  2,  8), (1,  8, 11), (1, 11, 12),
+        (2,  6, 10), (6, 12,  5), (12, 11, 3), (11, 8,  7), (8,  2,  9),
+        (4, 10,  5), (4,  5,  3), (4,  3,  7), (4,  7,  9), (4,  9, 10),
+        (5, 10,  6), (3,  5, 12), (7,  3, 11), (9,  7,  8), (10, 9,  2)
+    ]
+    mesh = FD.normal_mesh(verts, faces)
+    meshdata = FD.MeshData(mesh)
 
+    interp_f32 = FD.AngleWeightInterpolator(meshdata, Float32)
+    interp_f64 = FD.AngleWeightInterpolator(meshdata, Float64)
+    n_faces = length(mesh.faces)
+    n_verts = length(mesh.position)
 
+    # 1. Partition of unity & scalar types (Float32 and Float64)
+    @testset "Scalars ($FT)" for (interp, FT) in ((interp_f32, Float32), (interp_f64, Float64))
+        const_faces = fill(FT(3.5), n_faces)
+        const_verts = interp(const_faces)
+        @test const_verts isa Vector{FT}
+        @test size(const_verts) == (n_verts,)
+        @test all(isfinite, const_verts)
+        @test isapprox(const_verts, fill(FT(3.5), n_verts); rtol = FT(1e-5))
+
+        facedata = rand(FT, n_faces)
+        vertdata = interp(facedata)
+        buffer = similar(vertdata)
+        vertdata2 = interp(buffer, facedata)
+        @test vertdata2 === buffer
+        @test eltype(vertdata2) == FT
+        @test vertdata == vertdata2
+    end
+
+    # 2. StaticVectors (3D flow directions & 5-component compact FOT)
+    @testset "StaticVectors" begin
+        # SVector{3, Float32}
+        v3_faces = [FD.SVector{3, Float32}(1.0f0, -2.0f0, 0.5f0) for _ in 1:n_faces]
+        v3_verts = interp_f32(v3_faces)
+        @test v3_verts isa Vector{FD.SVector{3, Float32}}
+        @test all(v -> isapprox(v, FD.SVector{3, Float32}(1.0f0, -2.0f0, 0.5f0); rtol = 1f-5), v3_verts)
+
+        v3_rand = [rand(FD.SVector{3, Float32}) for _ in 1:n_faces]
+        v3_buf = similar(v3_verts)
+        @test interp_f32(v3_buf, v3_rand) === v3_buf
+        @test v3_buf == interp_f32(v3_rand)
+
+        # SVector{5, Float32} (5-component symmetric FOT: a11, a22, a12, a13, a23)
+        fot5_const = FD.SVector{5, Float32}(0.70f0, 0.20f0, 0.05f0, -0.02f0, 0.01f0)
+        fot5_faces = fill(fot5_const, n_faces)
+        fot5_verts = interp_f32(fot5_faces)
+        @test fot5_verts isa Vector{FD.SVector{5, Float32}}
+        @test all(v -> isapprox(v, fot5_const; rtol = 1f-5), fot5_verts)
+    end
+
+    # 3. GeometryBasics types (Vec3f / Point3f)
+    @testset "GeometryBasics Vec3f & Point3f" begin
+        vec_const = FD.Vec3f(0.25f0, -0.5f0, 1.0f0)
+        vec_verts = interp_f32(fill(vec_const, n_faces))
+        @test vec_verts isa Vector{FD.Vec3f}
+        @test all(v -> isapprox(v, vec_const; rtol = 1f-5), vec_verts)
+
+        pt_const = FD.Point3f(2.0f0, 4.0f0, -1.0f0)
+        pt_verts = interp_f32(fill(pt_const, n_faces))
+        @test pt_verts isa Vector{FD.Point3f}
+        @test all(p -> isapprox(p, pt_const; rtol = 1f-5), pt_verts)
+    end
+
+    # 4. Small StaticMatrices (full 3×3 Fiber Orientation Tensor)
+    @testset "SMatrix{3, 3}" begin
+        A_const = FD.SMatrix{3, 3, Float32, 9}(
+            0.72f0, 0.04f0, -0.01f0,
+            0.04f0, 0.20f0,  0.02f0,
+           -0.01f0, 0.02f0,  0.08f0
+        )
+        mat_faces = fill(A_const, n_faces)
+        mat_verts = interp_f32(mat_faces)
+        @test mat_verts isa Vector{FD.SMatrix{3, 3, Float32, 9}}
+        @test all(M -> isapprox(M, A_const; rtol = 1f-5), mat_verts)
+
+        mat_rand = [rand(FD.SMatrix{3, 3, Float32, 9}) for _ in 1:n_faces]
+        mat_buf = similar(mat_verts)
+        @test interp_f32(mat_buf, mat_rand) === mat_buf
+        @test mat_buf == interp_f32(mat_rand)
+    end
 end

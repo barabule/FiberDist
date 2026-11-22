@@ -3,17 +3,21 @@
 
 
 """
-    VoxelData(meshdata; res=100, padding=0.05)
+    VoxelData(meshdata; fullres=false, res=100)
 
-Voxelizes a Raycore acceleration structure (`meshdata.tlas`, `meshdata.mesh`) into a 
+Voxelizes a Raycore acceleration structure (`meshdata.tlas`, `meshdata.mesh`) into a
 3D `BitArray` using multi-threaded Z-axis ray-casting parity (even/odd rule).
-Returns `(; grid, voxel_spacing, corner)`.
+
+Guarantees:
+- At least 1 full layer of exterior air voxels (`false`) surrounding the geometry on all 6 sides
+  (required so the 3D EDT detects all exterior mold walls accurately).
+- Even grid dimensions `(res_x, res_y, res_z)` so 2× half-resolution thickness indexing
+  aligns cleanly with zero boundary remainder.
 """
 function VoxelData(
     meshdata::MeshData;
-    fullres = false, #if true the thickness is stored at full grid resolution, else at half res -> 1/8 the size!
-    res::Integer = 100,       # resolution across longest axis
-    padding::Real = 0.05      # relative padding to bounding box span
+    fullres::Bool = false,
+    res::Integer = 100
 )
     bvh, mesh = meshdata.tlas, meshdata.mesh
 
@@ -23,83 +27,93 @@ function VoxelData(
     T = float(eltype(min_bound))
 
     orig_span = max_bound - min_bound
-    pad_vec   = orig_span .* T(padding)
-    corner    = min_bound - pad_vec
-    max_pt    = max_bound + pad_vec
-    span      = max_pt - corner
+    max_span  = maximum(orig_span)
+    @assert max_span > zero(T) "Degenerate mesh bounding box with zero span."
 
-    max_span = maximum(span)
-    dx = max_span / T(res) # uniform cubic voxel size for now
+    # Interior resolution across longest axis; +2 adds 1 air voxel on each side
+    n_interior = max(2, Int(res))
+    dx = max_span / T(n_interior)
     dy = dx
     dz = dx
 
-    res_x = max(1, ceil(Int, span[1] / dx))
-    res_y = max(1, ceil(Int, span[2] / dy))
-    res_z = max(1, ceil(Int, span[3] / dz))
+    # Raw voxel counts including 1-voxel air margin on each side (+2 total per axis)
+    raw_nx = max(4, ceil(Int, orig_span[1] / dx) + 2)
+    raw_ny = max(4, ceil(Int, orig_span[2] / dy) + 2)
+    raw_nz = max(4, ceil(Int, orig_span[3] / dz) + 2)
 
-    voxel_grid = BitArray{3}(undef, res_x, res_y, res_z)
-    fill!(voxel_grid, false)
-    z_start = corner[3] - dx
-    ray_dir = SVector{3, T}(zero(T), zero(T), one(T))
-    eps_step = dx * T(1e-3)
+    # Round every axis up to an even integer so 2× half-res thickness aligns cleanly
+    res_x = raw_nx + isodd(raw_nx)
+    res_y = raw_ny + isodd(raw_ny)
+    res_z = raw_nz + isodd(raw_nz)
 
-    @info "Voxelizing mesh into $(res_x)×$(res_y)×$(res_z) BitArray grid..."
+    # Center the mesh inside the padded grid so all 6 outer faces have ≥ 1 air voxel
+    grid_span = SVector{3, T}(T(res_x) * dx, T(res_y) * dy, T(res_z) * dz)
+    mesh_mid  = (min_bound + max_bound) * T(0.5)
+    corner    = mesh_mid - grid_span * T(0.5)
 
-    # 2. Parallelize in chunks of 64 along the leading dimension `i` so each thread
-    #    owns disjoint 64-bit words in `voxel_grid.chunks` (100% race-condition free).
-    Threads.@threads for i_start in 1:64:res_x
-        i_end = min(i_start + 63, res_x)
-        hits = T[] # reused per thread to avoid allocations
+    # Use byte-addressable Array{Bool, 3} during multi-threaded writes (100% race-free),
+    # then pack into BitArray{3} in a single vectorized pass
+    dense_grid = zeros(Bool, res_x, res_y, res_z)
+    z_start    = corner[3] - dz
+    ray_dir    = SVector{3, T}(zero(T), zero(T), one(T))
+    eps_step   = dz * T(1e-3)
+    dedup_tol  = dz * T(1e-2)
 
-        for j in 1:res_y
-            y = corner[2] + (T(j) - T(0.5)) * dy
+    @info "Voxelizing mesh into $(res_x)×$(res_y)×$(res_z) BitArray grid (dx=$(round(dx; sigdigits=4)))..."
 
-            for i in i_start:i_end
-                x = corner[1] + (T(i) - T(0.5)) * dx
-                empty!(hits)
+    Threads.@threads for j in 1:res_y
+        hits = T[]
+        clean_hits = T[]
+        y = corner[2] + (T(j) - T(0.5)) * dy
 
-                curr_z = z_start
-                while true
-                    ray = Raycore.Ray(o = Point3{T}(x, y, curr_z), d = ray_dir)
-                    hit_found, _, distance, _, _ = Raycore.closest_hit(bvh, ray)
-                    hit_found || break
+        for i in 1:res_x
+            x = corner[1] + (T(i) - T(0.5)) * dx
+            empty!(hits)
 
-                    z_hit = curr_z + T(distance)
-                    push!(hits, z_hit)
-                    curr_z = z_hit + eps_step
+            curr_z = z_start
+            while true
+                ray = Raycore.Ray(o = Point3{T}(x, y, curr_z), d = ray_dir)
+                hit_found, _, distance, _, _ = Raycore.closest_hit(bvh, ray)
+                hit_found || break
+
+                z_hit = curr_z + T(distance)
+                push!(hits, z_hit)
+                curr_z = z_hit + eps_step
+            end
+
+            if length(hits) >= 2
+                sort!(hits)
+
+                # Deduplicate double-hits on shared triangle edges/vertices
+                empty!(clean_hits)
+                push!(clean_hits, hits[1])
+                for h_idx in 2:length(hits)
+                    if (hits[h_idx] - clean_hits[end]) > dedup_tol
+                        push!(clean_hits, hits[h_idx])
+                    end
                 end
 
-                # Even/odd parity fill along Z-column
-                n_hits = length(hits)
-                if n_hits >= 2
-                    sort!(hits)
-                    # Iterate over [entry, exit] pairs directly in index space
-                    for m in 1:2:(n_hits - 1)
-                        z_enter = hits[m]
-                        z_exit  = hits[m + 1]
+                n_clean = length(clean_hits)
+                for m in 1:2:(n_clean - 1)
+                    z_enter = clean_hits[m]
+                    z_exit  = clean_hits[m + 1]
 
-                        # Voxel center is at corner[3] + (k - 0.5) * dz
-                        k_min = clamp(ceil(Int,  (z_enter - corner[3]) / dz + T(0.5)), 1, res_z)
-                        k_max = clamp(floor(Int, (z_exit  - corner[3]) / dz + T(0.5)), 1, res_z)
+                    # Keep at least 1 outer air voxel (clamp to 2:(res_z - 1))
+                    k_min = clamp(ceil(Int,  (z_enter - corner[3]) / dz + T(0.5)), 2, res_z - 1)
+                    k_max = clamp(floor(Int, (z_exit  - corner[3]) / dz + T(0.5)), 2, res_z - 1)
 
-                        for k in k_min:k_max
-                            @inbounds voxel_grid[i, j, k] = true
-                        end
+                    @inbounds for k in k_min:k_max
+                        dense_grid[i, j, k] = true
                     end
                 end
             end
         end
     end
 
-    
-    grid = voxel_grid
+    grid = BitArray(dense_grid)
     voxel_spacing = (dx, dy, dz)
-    corner = corner
-    if fullres
-        thickness = compute_squared_thickness_u16(grid)
-    else
-        thickness = compute_halfres_thickness(grid)
-    end
+
+    thickness = fullres ? compute_squared_thickness_u16(grid) : compute_halfres_thickness(grid)
     return VoxelData(grid, thickness, voxel_spacing, corner)
 end
 
@@ -361,6 +375,7 @@ function edt_1d_parabolic_strided!(
     end
     return nothing
 end
+
 function compute_halfres_thickness(grid::BitArray{3})
     full_dims = size(grid)
     fnx, fny, fnz = full_dims
@@ -373,7 +388,8 @@ function compute_halfres_thickness(grid::BitArray{3})
     coarse_mask = falses(cnx, cny, cnz)
 
     # Pass 1: Full-resolution X-EDT, strided into coarse (cnx, cny, cnz)
-    # Only solid fine voxels contribute to solid coarse cells (never zeroed by adjacent air)
+    # A coarse 2x2x2 block is interior-solid iff > 4 of its 8 fine voxels are solid
+    # (so a 1-voxel exterior air margin in grid remains an air boundary in coarse_mask)
     Threads.@threads for ck in 1:cnz
         f = Vector{Int64}(undef, fnx)
         d = Vector{Int64}(undef, fnx)
@@ -386,15 +402,13 @@ function compute_halfres_thickness(grid::BitArray{3})
 
             for ci in 1:cnx
                 i0, i1 = 2ci - 1, min(2ci, fnx)
-                has_solid = false
+                solid_cnt = 0
                 for fk in k0:k1, fj in j0:j1, fi in i0:i1
-                    if grid[fi, fj, fk]
-                        has_solid = true
-                        break
-                    end
+                    solid_cnt += Int(grid[fi, fj, fk])
                 end
-                coarse_mask[ci, cj, ck] = has_solid
-                r_sq[ci, cj, ck] = has_solid ? typemax(UInt16) : UInt16(0)
+                is_solid = solid_cnt > 4
+                coarse_mask[ci, cj, ck] = is_solid
+                r_sq[ci, cj, ck] = is_solid ? typemax(UInt16) : UInt16(0)
             end
 
             for fk in k0:k1, fj in j0:j1
@@ -415,7 +429,6 @@ function compute_halfres_thickness(grid::BitArray{3})
                     coarse_mask[ci, cj, ck] || continue
                     i0, i1 = 2ci - 1, min(2ci, fnx)
 
-                    # Only consider solid fine voxels in [i0, i1] so air neighbors don't write 0
                     s0 = grid[i0, fj, fk]
                     s1 = (i1 > i0) && grid[i1, fj, fk]
                     (s0 || s1) || continue
@@ -529,7 +542,6 @@ function compute_halfres_thickness(grid::BitArray{3})
 
     return HalfResThickness(thick_coarse, full_dims)
 end
-
 
 
 
@@ -905,6 +917,3 @@ function gates_to_voxels(
     return gate_voxels
 end
 
-function KernelAbstractions.get_backend(A::FiberDist.HalfResThickness)
-    return KernelAbstractions.get_backend(A.data)
-end

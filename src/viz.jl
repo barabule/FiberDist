@@ -1,81 +1,12 @@
 
-
-
-
-# """
-#     facetovertex(meshdata::MeshData, facefield::AbstractVector{T}) where T
-
-# Extrapolates some field defined over the triangles (facefield) to the vertices by averaging over vertex neighbours
-# Return a vector of the same eltype as facefield with the length of the vertices of the mesh.
-# """
-# function facetovertex(meshdata::MeshData, facefield::AbstractVector{T}) where T
-#     @assert length(meshdata.mesh.faces) == length(facefield) "facefield must have the same length as the number of triangles in mesh: got $(length(facefield))"
-
-#     out = zeros(T, length(meshdata.mesh.position))
-#     count = zeros(UInt8, length(out))
-#     for (triangle, val) in zip(meshdata.mesh.faces, facefield)
-#         i1, i2, i3 = triangle
-
-#         out[i1] += val
-#         out[i2] += val
-#         out[i3] += val
-#         count[i1] += 1
-#         count[i2] += 1
-#         count[i3] += 1
-#     end
-#     out ./= count
-#     return out
-# end
-
-
-# function facetovertex!(buffer, meshdata::MeshData, facefield::AbstractVector{T}) where T
-#     @assert length(meshdata.mesh.faces) == length(facefield) "facefield must have the same length as the number of triangles in mesh: got $(length(facefield))"
-
-#     # out = zeros(T, length(meshdata.mesh.position))
-#     # count = zeros(UInt8, length(out))
-#     out, count = buffer
-#     @assert eltype(out) == T
-#     @assert length(out) == length(count) == length(meshdata.mesh.position)
-#     #zero out buffers
-#     for i in eachindex(out)
-#         out[i] = zero(T)
-#     end
-#     for i in eachindex(count)
-#         count[i] = 0
-#     end
-#     for (triangle, val) in zip(meshdata.mesh.faces, facefield)
-#         i1, i2, i3 = triangle
-
-#         out[i1] += val
-#         out[i2] += val
-#         out[i3] += val
-#         count[i1] += 1
-#         count[i2] += 1
-#         count[i3] += 1
-#     end
-#     out ./= count
-#     return nothing
-# end
-
-# function vertex_buffer(meshdata::MeshData, T::Type)
-#     N = length(meshdata.mesh.position)
-#     out = Vector{T}(undef, N)
-#     count = zeros(UInt8, N)
-#     return (;out, count)
-# end
-
-
-
-
-
 """
     AngleWeightInterpolator(mesh::AbstractMesh, ::Type{T}=Float64)
 
 Precompute normalized tip-angle weights for a `GeometryBasics` triangle mesh.
 """
 function AngleWeightInterpolator(mesh::AbstractMesh, ::Type{T}=Float64) where {T<:AbstractFloat}
-    positions = mesh.position # Equivalent to mesh.position
-    tri_faces = mesh.faces       # Equivalent to mesh.faces
+    positions = mesh.position 
+    tri_faces = mesh.faces      
     
     n_verts = length(positions)
     n_faces = length(tri_faces)
@@ -137,8 +68,12 @@ In-place extrapolation of `face_data` into the pre-allocated vertex buffer `out`
 Works for scalars, `Vec`, `Point`, `SVector`, `SMatrix`, etc.
 """
 function extrapolate_to_vertices!(out::AbstractVector, interp::AngleWeightInterpolator, face_data::AbstractVector)
+    ET = eltype(face_data)
+    @assert applicable(zero, ET) "Unsupported element type $ET: `zero($ET)` must be defined (use scalars, SVector, SMatrix, Vec, or Point rather than dynamically sized Vector/Matrix)."
     @assert length(out) == size(interp.W, 1) "Output buffer length must match vertex count."
     @assert length(face_data) == size(interp.W, 2) "Input data length must match face count."
+
+    fill!(out, zero(eltype(out)))
     mul!(out, interp.W, face_data)
     return out
 end
