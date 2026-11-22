@@ -11,10 +11,18 @@ end
 
 @testset "STL import" verbose = true begin
     fn = "test_assets/cube.stl"
-    meshdata = FD.meshdata(fn)
+    meshdata = FD.MeshData(fn)
     @test FD.is_valid(meshdata.mesh)
     @test hasproperty(meshdata, :tlas)
 end
+
+@testset "MeshData" verbose = true begin
+    mesh = FD.normal_mesh(FD.Tesselation(FD.Sphere(FD.Point3f(0), 1.0f0), 3))
+    meshdata = FD.MeshData(mesh)
+    @test true
+end
+
+
 
 @testset "Voxelization Solve and Project" verbose = true begin
 
@@ -51,5 +59,11 @@ end
     layered_fot = FD.compute_triangle_layered_fot(meshproj)
 
     @test size(layered_fot.layers.a11)[1] == length(meshdata.mesh.faces)
+
+end
+
+
+@testset "Extrapolate" verbose = true begin
+
 
 end

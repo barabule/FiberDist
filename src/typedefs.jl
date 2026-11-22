@@ -35,8 +35,23 @@ struct MeshData{T<:Real} #Struct contains a mesh and its acceleration struct
 end
 
 function MeshData(mesh::GeometryBasics.AbstractMesh{3, T}, tlas::Raycore.AbstractAdaptedAccel) where T<:Real
-    adj = build_mesh_adjacency(mesh)
+    adj = MeshAdjacency(mesh)
     return MeshData{T}(mesh, tlas, adj)
+end
+
+function MeshData(mesh::GeometryBasics.AbstractMesh{3, T}) where T<:Real
+    faces=  mesh.faces
+    if eltype(faces) <: TriangleFace
+        trimesh =  mesh
+    end
+    tri_faces = decompose(TriangleFace, faces)
+    trimesh = GeometryBasics.Mesh(vertex_attributes(mesh), tri_faces)
+
+    tlas = TLAS([mesh], (mi, ti) -> UInt32(mi))
+
+    adj  = MeshAdjacency(trimesh)
+
+    return MeshData{T}(trimesh, tlas, adj)
 end
 
 
@@ -140,4 +155,16 @@ end
 
 function coordinates(m::SparseVoxelMask, voxeldata::VoxelData)
     return coordinates(m, voxeldata.voxel_spacing, voxeldata.corner)
+end
+
+
+
+"""
+    AngleWeightInterpolator{T}
+
+Precomputed sparse interpolation matrix mapping per-face values to per-vertex
+values using tip-angle weights.
+"""
+struct AngleWeightInterpolator{T<:AbstractFloat}
+    W::SparseMatrixCSC{T, Int}
 end

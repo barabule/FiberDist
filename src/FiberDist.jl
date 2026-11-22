@@ -29,8 +29,8 @@ include("tangent_projection.jl") # stage IV project to surface mesh per triangle
 
 # include("exporter.jl") #stage V - export to different formats
 
-# include("viz.jl") #extra
-# include("gui.jl")
+include("viz.jl") #extra viz
+include("gui.jl")
 
 
 

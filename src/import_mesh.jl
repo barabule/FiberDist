@@ -55,7 +55,7 @@ end
 
 
 
-function meshdata(fn::AbstractString; check_watertight = true)
+function MeshData(fn::AbstractString; check_watertight = true)
     isfile(fn) || throw(ArgumentError("File does not exist: $fn"))
 
     raw_mesh = load(fn)
@@ -73,7 +73,9 @@ function meshdata(fn::AbstractString; check_watertight = true)
         error("Mesh is not is_watertight!")
     end
 
-    return build_scene_bvh(welded)
+    mesh = GeometryBasics.Mesh(welded.nodes, welded.elements)
+    return MeshData(mesh)
+    # return build_scene_bvh(welded)
 end
 
 
@@ -163,7 +165,7 @@ end
 
 
 
-function build_mesh_adjacency(mesh)
+function MeshAdjacency(mesh::GeometryBasics.AbstractMesh)
     tris = mesh.faces
     n_tris = length(tris)
 
