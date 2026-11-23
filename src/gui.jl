@@ -212,14 +212,18 @@ function main()
         VoxelData(md; res = r)
     end
 
-    gates = Observable([
-        ValveGate(position = first_triangle_centroid(meshdata[]), open_time = 0.0, radius = 2.0)
-    ])
+    init_pos = Point3f(first(meshdata[].mesh.position))
+    init_r   = Float32(voxeldata[].voxel_spacing[1])
+    gates = Observable([ValveGate(position = init_pos, open_time = 0.0f0, radius = init_r)])
+    solver_gates = Observable(copy(gates[]))
 
     on(meshdata) do md
         c1 = first_triangle_centroid(md)
         r_def = max(Float32(voxeldata[].voxel_spacing[1]), 1.5f0)
-        gates[] = [ValveGate(position = c1, open_time = 0.0, radius = r_def)]
+        new_gates = [ValveGate(position = c1, open_time = 0.0f0, radius = r_def)]
+        dragged_gate[] = 0
+        gates[] = new_gates
+        solver_gates[] = copy(new_gates)
         center!(lscene.scene)
     end
 
@@ -227,12 +231,14 @@ function main()
         project_voxel_to_mesh_triangles(meshdata[], voxeldata[], solve_eikonal_fim_ka(voxeldata[], gates[]))
     )
 
-    stats = lift(meshdata, voxeldata, gates, voxel_confirmed) do md, vd, gts, confirmed
-        confirmed || return last_stats[]
-        filltime = solve_eikonal_fim_ka(vd, gts)
-        st = project_voxel_to_mesh_triangles(md, vd, filltime)
-        last_stats[] = st
-        return st
+    stats = lift(meshdata, voxeldata, solver_gates, voxel_confirmed) do md, vd, gts, confirmed
+        if !confirmed
+            return last_stats[]
+        end
+        sol = solve_eikonal_fim_ka(vd, gts)
+        res_stats = project_voxel_to_mesh_triangles(md, vd, sol)
+        last_stats[] = res_stats
+        return res_stats
     end
 
     vertex_itp_f32 = lift(meshdata) do md
@@ -498,6 +504,12 @@ function main()
         return p_near + Float32(distance) * (ray_vec / ray_len)
     end
 
+    # =========================================================================
+    # Gate Drag, Hover & Deferred Solver Trigger (Mouse Events)
+    # =========================================================================
+    gate_moved = Ref(false)
+
+    # --- Mouse Button: Start Drag on Press, Commit to Solver on Release ---
     on(events(fig).mousebutton; priority = 10) do event
         voxel_confirmed[] || return Consume(false)
         if event.button == Mouse.left
@@ -507,12 +519,17 @@ function main()
                 if g_idx > 0
                     dragged_gate[] = g_idx
                     hovered_gate[] = g_idx
+                    gate_moved[] = false
                     return Consume(true)
                 end
             elseif event.action == Mouse.release
                 if dragged_gate[] > 0
                     dragged_gate[] = 0
                     hovered_gate[] = find_near_gate(events(fig).mouseposition[])
+                    if gate_moved[]
+                        gate_moved[] = false
+                        solver_gates[] = copy(gates[]) # Run Eikonal solver once on release
+                    end
                     return Consume(true)
                 end
             end
@@ -520,6 +537,7 @@ function main()
         return Consume(false)
     end
 
+    # --- Mouse Position: Live Visual Drag & Hover Highlight (No Solver) ---
     on(events(fig).mouseposition; priority = 10) do mp
         voxel_confirmed[] || return Consume(false)
         g_drag = dragged_gate[]
@@ -530,7 +548,8 @@ function main()
                 old_g = gts[g_drag]
                 if sum(abs2, Point3f(old_g.position) - new_pos) > 1f-6
                     gts[g_drag] = ValveGate(position = new_pos, open_time = old_g.open_time, radius = old_g.radius)
-                    gates[] = gts
+                    gates[] = gts # Updates visual gate mesh only
+                    gate_moved[] = true
                 end
             end
             return Consume(true)
@@ -542,6 +561,7 @@ function main()
             return Consume(false)
         end
     end
+    # =========================================================================
 
     textbox_focused = Ref(false)
 
@@ -556,7 +576,9 @@ function main()
                 gts = copy(gates[])
                 default_r = isempty(gts) ? Float32(voxeldata[].voxel_spacing[1]) : gts[end].radius
                 push!(gts, ValveGate(position = new_pos, open_time = 0.0f0, radius = default_r))
+                dragged_gate[] = 0
                 gates[] = gts
+                solver_gates[] = copy(gts)
                 hovered_gate[] = length(gts)
             end
             return Consume(true)
@@ -570,6 +592,7 @@ function main()
                     deleteat!(new_gts, target_idx)
                     dragged_gate[] = 0
                     gates[] = new_gts
+                    solver_gates[] = copy(new_gts)
                     hovered_gate[] = find_near_gate(mp)
                 end
             end
