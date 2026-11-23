@@ -217,6 +217,8 @@ function main()
     gates = Observable([ValveGate(position = init_pos, open_time = 0.0f0, radius = init_r)])
     solver_gates = Observable(copy(gates[]))
 
+    flow_line_half_len = Observable(1.0)
+
     on(meshdata) do md
         c1 = first_triangle_centroid(md)
         r_def = max(Float32(voxeldata[].voxel_spacing[1]), 1.5f0)
@@ -225,6 +227,7 @@ function main()
         gates[] = new_gates
         solver_gates[] = copy(new_gates)
         center!(lscene.scene)
+        flow_line_half_len[] = compute_flow_line_len(md)
     end
 
     last_stats = Ref(
@@ -1128,8 +1131,8 @@ function main()
 
     ########################   OVERLAYS     ##############################################
     show_flow_dirs  = Observable(false)
-    show_weld_lines = Observable(true)
-    show_air_traps  = Observable(true)
+    show_weld_lines = Observable(false)
+    show_air_traps  = Observable(false)
 
     panel_w = card_w + 26
     panel_h = 150
@@ -1267,13 +1270,13 @@ function main()
         overdraw = true,
     )
 
-    flow_segments = lift(stats, voxeldata, show_flow_dirs) do st, vd, visible
+    flow_segments = lift(stats, voxeldata, show_flow_dirs, flow_line_half_len) do st, vd, visible, half_len
         pts = Point3f[]
         visible || return pts
 
         dx = Float32(vd.voxel_spacing[1])
         normal_offset = 0.08f0 * dx
-        half_len      = 0.35f0 * dx
+        # half_len      = 0.35f0 * dx
 
         centroids = st.centroids
         normals   = st.normals
@@ -1383,4 +1386,24 @@ function main()
     )
 
     return fig
+end
+
+
+function compute_flow_line_len(md::MeshData)
+
+    pts, tris = md.mesh.position, md.mesh.faces
+
+    len = 0.0
+    for tri in tris
+        i1, i2, i3 = tri
+        e12 = pts[i1] - pts[i2]
+        e13 = pts[i1] - pts[i3]
+        e23 = pts[i2] - pts[i3]
+        l12 = dot(e12, e12)
+        l13 = dot(e13, e13)
+        l23 = dot(e23, e23)
+        lmax = max(l12, max(l13, l23))
+        len += sqrt(lmax)
+    end
+    return len / length(tris)
 end

@@ -31,8 +31,8 @@ include("tangent_projection.jl") # stage IV project to surface mesh per triangle
 
 # include("exporter.jl") #stage V - export to different formats
 
-include("sparse_bricks.jl")
-using .SparseBrick
+# include("sparse_bricks.jl")
+# using .SparseBrick
 
 
 include("viz.jl") #extra viz
@@ -40,12 +40,12 @@ include("gui.jl")
 
 
 
-export SparseBrickGrid,
-       build_sparse_bricks,
-       compute_brick_edt!,
-       solve_eikonal_sparse!,
-       voxelize_and_solve_sparse,
-       project_to_surface_sparse,
-       query_sparse_point
+# export SparseBrickGrid,
+#        build_sparse_bricks,
+#        compute_brick_edt!,
+#        solve_eikonal_sparse!,
+#        voxelize_and_solve_sparse,
+#        project_to_surface_sparse,
+#        query_sparse_point
 
 end # module FiberDist
