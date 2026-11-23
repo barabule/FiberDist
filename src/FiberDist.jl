@@ -16,6 +16,8 @@ using DataStructures
 using Printf
 using Random
 using Adapt
+using NativeFileDialog
+
 
 include("typedefs.jl") #types
 
