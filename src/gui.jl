@@ -347,7 +347,8 @@ function with_computed_gate_delays(
     r_ref::Float32 = 2.0f0,
     power::Float32 = 2.2f0,
     alpha::Float32 = 0.035f0
-)::Vector{ValveGate}
+    )::Vector{ValveGate}
+    
     isempty(gates) && return ValveGate[]
 
     nx, ny, nz = size(vd.grid)
