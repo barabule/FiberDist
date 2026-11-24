@@ -89,6 +89,27 @@ function set_overdraw_recursive!(scene::Scene)
     end
 end
 
+function set_visible_recursive!(plot::AbstractPlot, vis::Bool)
+    if haskey(plot.attributes, :visible)
+        try
+            plot.visible[] = vis
+        catch
+        end
+    end
+    for child_plot in plot.plots
+        set_visible_recursive!(child_plot, vis)
+    end
+end
+
+function set_visible_recursive!(scene::Scene, vis::Bool)
+    for p in scene.plots
+        set_visible_recursive!(p, vis)
+    end
+    for child in scene.children
+        set_visible_recursive!(child, vis)
+    end
+end
+
 """
     align_flow_segments!(pts::Vector{Point3f}, st, dx::Float32; n_iters::Int = 2)
 
@@ -974,7 +995,7 @@ function register_interaction_handlers!(state::AppState)
                     new_gts = copy(gts)
                     deleteat!(new_gts, target_idx)
                     state.dragged_gate[] = 0
-                    updated = with_computed_gate_delays(gts, state.voxeldata[])
+                    updated = with_computed_gate_delays(new_gts, state.voxeldata[])
                     state.gates[] = updated
                     state.solver_gates[] = updated
                     state.hovered_gate[] = find_near_gate(state, mp)
@@ -1011,9 +1032,21 @@ function track_textbox_focus!(state::AppState, tbs...)
     end
 end
 
+function set_block_visible!(block, vis::Bool)
+    if hasproperty(block, :elements)
+        for el in values(block.elements)
+            set_visible_recursive!(el, vis)
+        end
+    end
+    if hasproperty(block, :blockscene) && block.blockscene !== nothing
+        set_visible_recursive!(block.blockscene, vis)
+    end
+end
+
+
 function build_geometry_panel!(state::AppState, left_panel_w::Int)
     sc = state.overlay_scene
-    geom_panel_h = @lift($(state.is_cad_file) ? 185 : 82)
+    geom_panel_h = @lift($(state.is_cad_file) ? 202 : 82)
 
     geom_card_rect = lift(state.lscene.scene.viewport, geom_panel_h) do vp, h
         x0 = vp.origin[1] + 14
@@ -1047,60 +1080,78 @@ function build_geometry_panel!(state::AppState, left_panel_w::Int)
         align = (:left, :center), overdraw = true,
     )
 
+    offscreen_bbox = BBox(-2000.0, -1999.0, -2000.0, -1999.0)
+
+    # Row 1: Element Size
     text!(
         sc,
-        @lift(Point2f($geom_card_rect.origin[1] + 12, $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 92));
+        @lift(Point2f($geom_card_rect.origin[1] + 12, $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 95));
         text = "Element Size:", fontsize = 11, color = :gray20,
         align = (:left, :center), visible = state.is_cad_file, overdraw = true,
     )
 
     tb_elem_size = Textbox(
         sc;
-        bbox = @lift(BBox(
-            $geom_card_rect.origin[1] + 135, $geom_card_rect.origin[1] + left_panel_w - 12,
-            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 103,
-            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 81
-        )),
-        stored_string = string(state.cad_elem_size[]), placeholder = "2.0",
+        bbox = lift(geom_card_rect, state.is_cad_file) do r, show_cad
+            show_cad || return offscreen_bbox
+            BBox(
+                r.origin[1] + 105, r.origin[1] + left_panel_w - 12,
+                r.origin[2] + r.widths[2] - 108,
+                r.origin[2] + r.widths[2] - 82
+            )
+        end,
+        stored_string = string(state.cad_elem_size[]),
+        displayed_string = string(state.cad_elem_size[]),
+        placeholder = "",
+        textpadding = (6, 6, 4, 4),
         fontsize = 11, tellwidth = false, tellheight = false,
     )
     set_overdraw_recursive!(tb_elem_size.blockscene)
 
+    # Row 2: Min Curvature
     text!(
         sc,
-        @lift(Point2f($geom_card_rect.origin[1] + 12, $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 118));
+        @lift(Point2f($geom_card_rect.origin[1] + 12, $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 129));
         text = "Min Curvature:", fontsize = 11, color = :gray20,
         align = (:left, :center), visible = state.is_cad_file, overdraw = true,
     )
 
     tb_min_curv = Textbox(
         sc;
-        bbox = @lift(BBox(
-            $geom_card_rect.origin[1] + 135, $geom_card_rect.origin[1] + left_panel_w - 12,
-            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 129,
-            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 107
-        )),
-        stored_string = string(state.cad_min_curv[]), placeholder = "1.0",
+        bbox = lift(geom_card_rect, state.is_cad_file) do r, show_cad
+            show_cad || return offscreen_bbox
+            BBox(
+                r.origin[1] + 105, r.origin[1] + left_panel_w - 12,
+                r.origin[2] + r.widths[2] - 142,
+                r.origin[2] + r.widths[2] - 116
+            )
+        end,
+        stored_string = string(state.cad_min_curv[]),
+        displayed_string = string(state.cad_min_curv[]),
+        placeholder = "",
+        textpadding = (6, 6, 4, 4),
         fontsize = 11, tellwidth = false, tellheight = false,
     )
     set_overdraw_recursive!(tb_min_curv.blockscene)
 
+    # Row 3: Remesh CAD button
     btn_remesh = Button(
         sc;
-        bbox = @lift(BBox(
-            $geom_card_rect.origin[1] + 12, $geom_card_rect.origin[1] + left_panel_w - 12,
-            $geom_card_rect.origin[2] + 12, $geom_card_rect.origin[2] + 38
-        )),
+        bbox = lift(geom_card_rect, state.is_cad_file) do r, show_cad
+            show_cad || return offscreen_bbox
+            BBox(
+                r.origin[1] + 12, r.origin[1] + left_panel_w - 12,
+                r.origin[2] + 14, r.origin[2] + 42
+            )
+        end,
         label = "Remesh CAD", fontsize = 12, tellwidth = false, tellheight = false,
     )
     set_overdraw_recursive!(btn_remesh.blockscene)
     track_textbox_focus!(state, tb_elem_size, tb_min_curv)
 
-    on(state.is_cad_file) do show_cad
+    on(state.is_cad_file; update = true) do show_cad
         for widget in (tb_elem_size, tb_min_curv, btn_remesh)
-            for p in widget.blockscene.plots
-                p.visible[] = show_cad
-            end
+            set_block_visible!(widget, show_cad)
         end
     end
 
@@ -1145,6 +1196,8 @@ function build_geometry_panel!(state::AppState, left_panel_w::Int)
 
     return geom_card_rect
 end
+
+
 
 function build_voxel_panel!(state::AppState, geom_card_rect::Observable{Rect2f}, left_panel_w::Int)
     sc = state.overlay_scene
