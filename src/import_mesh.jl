@@ -32,9 +32,15 @@ function load_step_mesh_as_surface(filepath::String;
 
     nodes = [Point3f(pointmatrix[1, i], pointmatrix[2, i], pointmatrix[3, i]) for i in axes(pointmatrix, 2)]
     
+    tag_to_idx = Dict{eltype(node_tags), UInt32}(
+        tag => UInt32(i) for (i, tag) in enumerate(node_tags)
+    )
     elements = map(1:size(trimatrix, 2)) do i
-        i1, i2, i3 = trimatrix[1, i], trimatrix[2, i], trimatrix[3, i]
-        GeometryBasics.TriangleFace(i1, i2, i3)
+        GeometryBasics.TriangleFace{UInt32}(
+            tag_to_idx[trimatrix[1, i]],
+            tag_to_idx[trimatrix[2, i]],
+            tag_to_idx[trimatrix[3, i]]
+        )
     end
     
     return (;nodes,
@@ -49,13 +55,18 @@ function build_scene_bvh(data)
     # @info typeof(mesh)
     # @info supertype(typeof(mesh))
 
-    tlas = TLAS([mesh], (mi, ti) -> UInt32(mi))
-    return MeshData(mesh, tlas)
+    # tlas = TLAS([mesh], (mi, ti) -> UInt32(mi))
+    return MeshData(mesh)
 end
 
 
 
-function MeshData(fn::AbstractString; check_watertight = true)
+"""
+    MeshData(fn::AbstractString)
+
+TBW
+"""
+function MeshData(fn::AbstractString)
     isfile(fn) || throw(ArgumentError("File does not exist: $fn"))
 
     raw_mesh = load(fn)
@@ -64,104 +75,212 @@ function MeshData(fn::AbstractString; check_watertight = true)
     end
 
     tri_faces = GeometryBasics.decompose(TriangleFace{UInt32}, raw_mesh)
+    vertices  = GeometryBasics.coordinates(raw_mesh)
 
-    vertices = raw_mesh.position
+    bb = GeometryBasics.Rect3(vertices)
+    diag = norm(bb.widths)
+    weld_tol = max(1e-5, 1e-6 * Float64(diag))
 
-    welded = weld_vertices(vertices, tri_faces)
+    welded = weld_vertices(vertices, tri_faces; tol = weld_tol)
+    oriented_faces = flip_normals_outward(welded.nodes, welded.elements)
 
-    if check_watertight && !is_valid(welded.nodes, welded.elements)
-        error("Mesh is not is_watertight!")
+    if !is_valid(welded.nodes, oriented_faces)
+        half_edges = Dict{Tuple{Int, Int}, Int}()
+        for f in oriented_faces, (u, v) in ((Int(f[1]), Int(f[2])), (Int(f[2]), Int(f[3])), (Int(f[3]), Int(f[1])))
+            half_edges[(u, v)] = get(half_edges, (u, v), 0) + 1
+        end
+        n_open = count(((u, v), c) -> c == 1 && get(half_edges, (v, u), 0) == 0, half_edges)
+        n_nonmanifold = count(((_, _), c) -> c > 1, half_edges)
+        error("Mesh is not watertight (open boundary edges: $n_open, non-manifold/flipped edges: $n_nonmanifold).")
     end
 
-    mesh = GeometryBasics.Mesh(welded.nodes, welded.elements)
+    mesh = GeometryBasics.Mesh(welded.nodes, oriented_faces)
     return MeshData(mesh)
-    # return build_scene_bvh(welded)
 end
 
 
-"""
-    is_valid(mesh::GeometryBasics.AbstractMesh)
 
-Returns `true` if `mesh` is:
-1. Closed and 2-manifold (watertight)
-2. Consistently oriented (adjacent triangles have opposite half-edge directions)
-3. Outward-facing (positive signed volume)
+
+
+
 """
-function is_valid(pts::AbstractVector{<:StaticVector{3}}, tris::AbstractVector{<:GeometryBasics.TriangleFace})
-    # pts = mesh.position
-    # tris = mesh.faces
+    weld_vertices(pts::AbstractVector{PT}, tris::AbstractVector{<:TriangleFace};
+                  tol::Real = 1f-5) where PT <: StaticVector{3, T} where T <: Real
+
+Merges duplicate vertex positions within `tol` using 27-neighbor spatial hashing
+and removes zero-area degenerate triangles collapsed by welding.
+"""
+function weld_vertices(
+    pts::AbstractVector{PT},
+    tris::AbstractVector{<:TriangleFace};
+    tol::Real = 1f-5
+) where PT <: StaticVector{3, T} where T <: Real
+    unique_pts = PT[]
+    remap = Vector{Int}(undef, length(pts))
+    tol_f = Float64(tol)
+    tol2  = tol_f * tol_f
+    inv_tol = inv(tol_f)
+
+    grid = Dict{NTuple{3, Int}, Vector{Int}}()
+    sizehint!(grid, length(pts))
+
+    @inbounds for (i, p) in enumerate(pts)
+        px, py, pz = Float64(p[1]), Float64(p[2]), Float64(p[3])
+        cx = floor(Int, px * inv_tol)
+        cy = floor(Int, py * inv_tol)
+        cz = floor(Int, pz * inv_tol)
+
+        found_idx = 0
+        for dz in -1:1, dy in -1:1, dx in -1:1
+            bucket = get(grid, (cx + dx, cy + dy, cz + dz), nothing)
+            bucket === nothing && continue
+            for cand in bucket
+                q = unique_pts[cand]
+                ddx = px - Float64(q[1])
+                ddy = py - Float64(q[2])
+                ddz = pz - Float64(q[3])
+                if (ddx * ddx + ddy * ddy + ddz * ddz) <= tol2
+                    found_idx = cand
+                    break
+                end
+            end
+            found_idx != 0 && break
+        end
+
+        if found_idx == 0
+            push!(unique_pts, p)
+            found_idx = length(unique_pts)
+            bucket = get!(Vector{Int}, grid, (cx, cy, cz))
+            push!(bucket, found_idx)
+        end
+        remap[i] = found_idx
+    end
+
+    welded_tris = TriangleFace{UInt32}[]
+    sizehint!(welded_tris, length(tris))
+    @inbounds for f in tris
+        v1 = UInt32(remap[f[1]])
+        v2 = UInt32(remap[f[2]])
+        v3 = UInt32(remap[f[3]])
+        if v1 != v2 && v2 != v3 && v3 != v1
+            push!(welded_tris, TriangleFace{UInt32}(v1, v2, v3))
+        end
+    end
+
+    return (; nodes = unique_pts, elements = welded_tris)
+end
+
+
+function signed_volume_6(
+    pts::AbstractVector{<:StaticVector{3}},
+    tris::AbstractVector{<:GeometryBasics.TriangleFace}
+)::Float64
+    isempty(tris) && return 0.0
+    p0 = SVector{3, Float64}(pts[1])
+    vol6 = 0.0
+    @inbounds for f in tris
+        p1 = SVector{3, Float64}(pts[f[1]]) - p0
+        p2 = SVector{3, Float64}(pts[f[2]]) - p0
+        p3 = SVector{3, Float64}(pts[f[3]]) - p0
+        vol6 += dot(p1, cross(p2, p3))
+    end
+    return vol6
+end
+
+"""
+    harmonize_winding(tris) -> Vector{TriangleFace{UInt32}}
+
+Propagates consistent triangle orientation across shared manifold edges via BFS
+so adjacent triangles always traverse shared edges in opposite directions.
+"""
+function harmonize_winding(tris::AbstractVector{<:GeometryBasics.TriangleFace})
+    n = length(tris)
+    out = [TriangleFace{UInt32}(UInt32(f[1]), UInt32(f[2]), UInt32(f[3])) for f in tris]
+    n == 0 && return out
+
+    # Map undirected edge (min, max) -> list of incident triangle indices
+    edge_tris = Dict{Tuple{UInt32, UInt32}, Vector{Int}}()
+    sizehint!(edge_tris, 3n ÷ 2)
+    @inbounds for (ti, f) in enumerate(out)
+        for (u, v) in ((f[1], f[2]), (f[2], f[3]), (f[3], f[1]))
+            key = u < v ? (u, v) : (v, u)
+            push!(get!(Vector{Int}, edge_tris, key), ti)
+        end
+    end
+
+    visited = falses(n)
+    queue = Int[]
+    sizehint!(queue, n)
+
+    @inbounds for seed in 1:n
+        visited[seed] && continue
+        visited[seed] = true
+        push!(queue, seed)
+
+        while !isempty(queue)
+            t = popfirst!(queue)
+            ft = out[t]
+            for (u, v) in ((ft[1], ft[2]), (ft[2], ft[3]), (ft[3], ft[1]))
+                key = u < v ? (u, v) : (v, u)
+                inc = edge_tris[key]
+                length(inc) == 2 || continue # only propagate across 2-manifold edges
+                nb = inc[1] == t ? inc[2] : inc[1]
+                visited[nb] && continue
+
+                fnb = out[nb]
+                # Neighbor must contain directed edge (v, u); if it has (u, v), flip it
+                same_dir = (fnb[1] == u && fnb[2] == v) ||
+                           (fnb[2] == u && fnb[3] == v) ||
+                           (fnb[3] == u && fnb[1] == v)
+                if same_dir
+                    out[nb] = TriangleFace{UInt32}(fnb[1], fnb[3], fnb[2])
+                end
+                visited[nb] = true
+                push!(queue, nb)
+            end
+        end
+    end
+
+    return out
+end
+
+function flip_normals_outward(
+    pts::AbstractVector{<:StaticVector{3}},
+    tris::AbstractVector{<:GeometryBasics.TriangleFace}
+)
+    consistent = harmonize_winding(tris)
+    if signed_volume_6(pts, consistent) < 0.0
+        return [TriangleFace{UInt32}(f[1], f[3], f[2]) for f in consistent]
+    end
+    return consistent
+end
+
+function is_valid(
+    pts::AbstractVector{<:StaticVector{3}},
+    tris::AbstractVector{<:GeometryBasics.TriangleFace}
+)
     isempty(tris) && return false
 
     half_edges = Dict{Tuple{Int, Int}, Int}()
     sizehint!(half_edges, 3 * length(tris))
 
-    # Accumulate 6 * signed volume using tetrahedra formed with the origin
-    signed_vol_6 = 0.0
-
-    for f in tris
-        v1, v2, v3 = f[1], f[2], f[3]
-
-        # 1. Check for degenerate index triangles
+    @inbounds for f in tris
+        v1, v2, v3 = Int(f[1]), Int(f[2]), Int(f[3])
         (v1 == v2 || v2 == v3 || v3 == v1) && return false
 
-        # 2. Record directed half-edges
         for (u, v) in ((v1, v2), (v2, v3), (v3, v1))
             half_edges[(u, v)] = get(half_edges, (u, v), 0) + 1
         end
-
-        # 3. Accumulate signed volume: dot(p1, cross(p2, p3))
-        p1, p2, p3 = pts[v1], pts[v2], pts[v3]
-        signed_vol_6 += dot(p1, cross(p2, p3))
     end
 
-    # 4. Verify watertightness AND consistent winding
-    # If every edge (u, v) has an exact opposite twin (v, u), all triangles are consistently oriented
     for ((u, v), count) in half_edges
         count != 1 && return false
         get(half_edges, (v, u), 0) != 1 && return false
     end
 
-    # 5. Verify normals point outward (positive volume)
-    return signed_vol_6 > 0
+    return signed_volume_6(pts, tris) > 0.0
 end
 
-function is_valid(mesh::GeometryBasics.AbstractMesh)
-    return is_valid(mesh.position, mesh.faces)
-end
-
-
-
-"""
-    weld_vertices(pts::AbstractVector{PT}, tris::AbstractVector{<:TriangleFace}; 
-                        tol::Real=1e-8) where PT<:StaticVector{3, T} where T<:Real
-
-Merges duplicate vertex positions within `tol` and remaps triangle indices.
-"""
-function weld_vertices(pts::AbstractVector{PT}, tris::AbstractVector{<:TriangleFace}; 
-                        tol::Real=1e-8) where PT<:StaticVector{3, T} where T<:Real
-    
-
-    unique_pts = PT[]
-    remap = Vector{Int}(undef, length(pts))
-    inv_tol = inv(tol)
-
-    # Spatial hashing via rounded grid coordinates
-    grid = Dict{NTuple{3, Int}, Int}()
-
-    for (i, p) in enumerate(pts)
-        key = (round(Int, p[1] * inv_tol), round(Int, p[2] * inv_tol), round(Int, p[3] * inv_tol))
-        idx = get(grid, key, 0)
-        if idx == 0
-            push!(unique_pts, p)
-            idx = length(unique_pts)
-            grid[key] = idx
-        end
-        remap[i] = idx
-    end
-
-    welded_tris = [TriangleFace(remap[f[1]], remap[f[2]], remap[f[3]]) for f in tris]
-    return (;nodes = unique_pts, elements = welded_tris)
-end
 
 
 
