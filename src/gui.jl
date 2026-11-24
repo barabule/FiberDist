@@ -53,6 +53,9 @@ mutable struct AppState
     # Interactive Input State
     hovered_gate::Observable{Int}
     dragged_gate::Base.RefValue{Int}
+    resizing_gate::Base.RefValue{Bool}
+    resize_start_y::Base.RefValue{Float32}
+    resize_start_r::Base.RefValue{Float32}
     gate_moved::Base.RefValue{Bool}
     textbox_focused::Base.RefValue{Bool}
 end
@@ -416,7 +419,7 @@ function init_app_state()::AppState
         n_stops, fill_step, cmap_name, base_cmap, mesh_cmap, Observable(false),
         slice_axis, slice_idx, slice_max,
         Observable(false), Observable(false), Observable(false), Observable(compute_flow_line_len(meshdata[])),
-        Observable(0), Ref(0), Ref(false), Ref(false)
+        Observable(0), Ref(0), Ref(false), Ref(0.0f0), Ref(1.0f0), Ref(false), Ref(false),
     )
 
     on(state.meshdata) do md
@@ -429,7 +432,7 @@ function init_app_state()::AppState
         center!(state.lscene.scene)
         state.flow_line_half_len[] = compute_flow_line_len(md)
     end
-
+    
     return state
 end
 
@@ -493,6 +496,8 @@ function configure_cad_camera!(state::AppState)
     cam.settings.projectiontype[] = Makie.Orthographic
     cam.settings.cad[] = true
     cam.settings.zoom_shift_lookat[] = true
+    cam.controls.left_key[] = false
+    cam.controls.right_key[] = false
 
     # Keep rotation centered on `cam.lookat[]` (the geometry center or clicked pivot)
     if hasproperty(cam.settings, :rotation_center)
@@ -543,7 +548,7 @@ function build_gate_meshes(state::AppState)
 
         for (idx, g) in enumerate(gts)
             pos = Point3f(g.position)
-            r   = max(Float32(g.radius), dx)
+            r = clamp(Float32(g.radius), GATE_RADIUS_MIN, GATE_RADIUS_MAX)
             h   = max(3.0f0 * r, 3.0f0 * dx)
 
             nearest_idx = argmin([sum(abs2, c - pos) for c in centroids])
@@ -765,26 +770,48 @@ end
 # =============================================================================
 # 5. Mouse & Keyboard Interaction Handlers
 # =============================================================================
+const GATE_RADIUS_MIN = 0.4f0 # 0.8 mm diameter (SFRP pinpoint minimum)
+const GATE_RADIUS_MAX = 6.0f0 # 12.0 mm diameter (large structural valve gate)
+
+function is_shift_pressed(fig::Figure)::Bool
+    return ispressed(fig, Keyboard.left_shift) || ispressed(fig, Keyboard.right_shift)
+end
 
 function register_interaction_handlers!(state::AppState)
     fig = state.fig
 
-    # Gate selection, drag start, and solver trigger on release
+    # Gate selection, drag/resize start, and solver trigger on release
     on(events(fig).mousebutton; priority = 10) do event
         state.voxel_confirmed[] || return Consume(false)
         if event.button == Mouse.left
             if event.action == Mouse.press
                 mp = events(fig).mouseposition[]
+                shift_down = is_shift_pressed(fig)
+
+                # If Shift is held, allow grabbing either the hovered gate or nearest gate under cursor
                 g_idx = find_near_gate(state, mp)
-                if g_idx > 0
+                if g_idx == 0 && shift_down && state.hovered_gate[] > 0
+                    g_idx = state.hovered_gate[]
+                end
+
+                if 1 <= g_idx <= length(state.gates[])
                     state.dragged_gate[] = g_idx
                     state.hovered_gate[] = g_idx
                     state.gate_moved[] = false
+
+                    if shift_down
+                        state.resizing_gate[] = true
+                        state.resize_start_y[] = Float32(mp[2])
+                        state.resize_start_r[] = Float32(state.gates[][g_idx].radius)
+                    else
+                        state.resizing_gate[] = false
+                    end
                     return Consume(true)
                 end
             elseif event.action == Mouse.release
                 if state.dragged_gate[] > 0
                     state.dragged_gate[] = 0
+                    state.resizing_gate[] = false
                     state.hovered_gate[] = find_near_gate(state, events(fig).mouseposition[])
                     if state.gate_moved[]
                         state.gate_moved[] = false
@@ -797,16 +824,29 @@ function register_interaction_handlers!(state::AppState)
         return Consume(false)
     end
 
-    # Live visual gate drag and hover highlight
+    # Live visual gate move OR Shift-drag radius scaling + hover highlight
     on(events(fig).mouseposition; priority = 10) do mp
         state.voxel_confirmed[] || return Consume(false)
         g_drag = state.dragged_gate[]
-        if g_drag > 0 && ispressed(fig, Mouse.left)
-            new_pos = pick_surface_point(state, mp)
-            if new_pos !== nothing && 1 <= g_drag <= length(state.gates[])
-                gts = copy(state.gates[])
-                old_g = gts[g_drag]
-                if sum(abs2, Point3f(old_g.position) - new_pos) > 1f-6
+
+        if g_drag > 0 && ispressed(fig, Mouse.left) && 1 <= g_drag <= length(state.gates[])
+            gts = copy(state.gates[])
+            old_g = gts[g_drag]
+
+            if state.resizing_gate[]
+                # Dragging up increases radius, dragging down decreases (~0.025 mm per pixel)
+                dy_px = Float32(mp[2]) - state.resize_start_y[]
+                raw_r = state.resize_start_r[] + 0.025f0 * dy_px
+                new_r = clamp(raw_r, GATE_RADIUS_MIN, GATE_RADIUS_MAX)
+
+                if abs(Float32(old_g.radius) - new_r) > 1f-4
+                    gts[g_drag] = ValveGate(position = old_g.position, open_time = old_g.open_time, radius = new_r)
+                    state.gates[] = gts
+                    state.gate_moved[] = true
+                end
+            else
+                new_pos = pick_surface_point(state, mp)
+                if new_pos !== nothing && sum(abs2, Point3f(old_g.position) - new_pos) > 1f-6
                     gts[g_drag] = ValveGate(position = new_pos, open_time = old_g.open_time, radius = old_g.radius)
                     state.gates[] = gts
                     state.gate_moved[] = true
@@ -822,7 +862,8 @@ function register_interaction_handlers!(state::AppState)
         end
     end
 
-    # Set orbit pivot to clicked CAD surface point on Right/Middle press (CAD style)
+
+# Set orbit pivot to clicked CAD surface point on Right/Middle press (CAD style)
     on(events(fig).mousebutton; priority = 15) do event
         if event.action == Mouse.press && event.button == Mouse.middle
             mp = events(fig).mouseposition[]
@@ -879,8 +920,6 @@ function register_interaction_handlers!(state::AppState)
         return Consume(false)
     end
 end
-
-
 # =============================================================================
 # 6. Modular HUD / Overlay Panels
 # =============================================================================
