@@ -1,7 +1,7 @@
 
 
 # 1. Load STEP and generate surface mesh via Gmsh
-function load_step_mesh_as_surface(filepath::String;
+function load_step_mesh_as_surface(filepath::AbstractString;
             target_element_size = 2.0,
             min_curvature_size = 1.0,
             min_circle_points = 15,
