@@ -428,7 +428,10 @@ function init_app_state()::AppState
 
     res = Observable(100)
     voxel_confirmed = Observable(true)
-    voxeldata = lift((md, r) -> VoxelData(md; res = r), meshdata, res)
+    
+    voxeldata = lift(meshdata, res) do md, r
+        VoxelData(md; res = r)
+    end
 
     init_pos = Point3f(first(meshdata[].mesh.position))
     init_r   = Float32(voxeldata[].voxel_spacing[1])
@@ -583,6 +586,9 @@ function configure_cad_camera!(state::AppState)
     cam.settings.zoom_shift_lookat[] = true
     cam.controls.left_key[] = false
     cam.controls.right_key[] = false
+    cam.controls.up_key[] = false
+    cam.controls.down_key[] = false
+
 
     # Keep rotation centered on `cam.lookat[]` (the geometry center or clicked pivot)
     if hasproperty(cam.settings, :rotation_center)
