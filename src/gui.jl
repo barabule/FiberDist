@@ -311,6 +311,64 @@ function find_near_gate(state::AppState, mp)
 end
 
 
+"""
+    with_computed_gate_delays(gates::AbstractVector{ValveGate}, vd::VoxelData;
+                              r_ref::Float32 = 2.0f0,
+                              power::Float32 = 2.2f0,
+                              alpha::Float32 = 0.035f0) -> Vector{ValveGate}
+
+Returns a copy of `gates` with `open_time` populated from each gate's `radius`
+and normalized so the earliest gate opens at `t = 0.0f0`.
+"""
+function with_computed_gate_delays(
+    gates::AbstractVector{ValveGate},
+    vd::VoxelData;
+    r_ref::Float32 = 2.0f0,
+    power::Float32 = 2.2f0,
+    alpha::Float32 = 0.035f0
+)::Vector{ValveGate}
+    isempty(gates) && return ValveGate[]
+
+    nx, ny, nz = size(vd.grid)
+    dx, dy, dz = Float32.(vd.voxel_spacing)
+    L_char = max(nx * dx, ny * dy, nz * dz)
+
+    dx_mean = (dx + dy + dz) / 3.0f0
+    base_h2 = 4.0f0 * dx_mean * dx_mean
+
+    sum_F = 0.0
+    count_F = 0
+    @inbounds for idx in eachindex(vd.grid)
+        if vd.grid[idx]
+            rsq = Float32(vd.thickness[idx])
+            if rsq > 0.0f0
+                sum_F += Float64(base_h2 * rsq)
+                count_F += 1
+            end
+        end
+    end
+
+    F_char = count_F > 0 ? Float32(sum_F / count_F) : base_h2
+    t_ref = L_char / max(F_char, 1f-6)
+
+    raw_times = Vector{Float32}(undef, length(gates))
+    @inbounds for (i, g) in enumerate(gates)
+        r = clamp(Float32(g.radius), GATE_RADIUS_MIN, GATE_RADIUS_MAX)
+        ratio = max(r_ref / r, 1.0f0)
+        raw_times[i] = alpha * t_ref * (ratio^power - 1.0f0)
+    end
+
+    t0 = minimum(raw_times)
+    return [
+        ValveGate(
+            position  = g.position,
+            radius    = g.radius,
+            open_time = raw_times[i] - t0
+        )
+        for (i, g) in enumerate(gates)
+    ]
+end
+
 # =============================================================================
 # 3. State Initialization & Reactive Data Pipeline
 # =============================================================================
@@ -354,7 +412,7 @@ function init_app_state()::AppState
     init_pos = Point3f(first(meshdata[].mesh.position))
     init_r   = Float32(voxeldata[].voxel_spacing[1])
     gates = Observable([ValveGate(position = init_pos, open_time = 0.0f0, radius = init_r)])
-    solver_gates = Observable(copy(gates[]))
+    solver_gates = Observable(with_computed_gate_delays(gates[], voxeldata[]))
 
     last_stats = Ref{Any}(
         project_voxel_to_mesh_triangles(meshdata[], voxeldata[], solve_eikonal_fim_ka(voxeldata[], gates[]))
@@ -428,11 +486,17 @@ function init_app_state()::AppState
         new_gates = [ValveGate(position = c1, open_time = 0.0f0, radius = r_def)]
         state.dragged_gate[] = 0
         state.gates[] = new_gates
-        state.solver_gates[] = copy(new_gates)
+        state.solver_gates[] = with_computed_gate_delays(new_gates, state.voxeldata[])
         center!(state.lscene.scene)
         state.flow_line_half_len[] = compute_flow_line_len(md)
     end
     
+    on(state.voxeldata) do vd
+        updated = with_computed_gate_delays(state.gates[], vd)
+        state.gates[] = updated
+        state.solver_gates[] = updated
+    end
+
     return state
 end
 
@@ -815,7 +879,9 @@ function register_interaction_handlers!(state::AppState)
                     state.hovered_gate[] = find_near_gate(state, events(fig).mouseposition[])
                     if state.gate_moved[]
                         state.gate_moved[] = false
-                        state.solver_gates[] = copy(state.gates[])
+                        updated = with_computed_gate_delays(state.gates[], state.voxeldata[])
+                        state.gates[] = updated
+                        state.solver_gates[] = updated
                     end
                     return Consume(true)
                 end
@@ -893,8 +959,9 @@ function register_interaction_handlers!(state::AppState)
                 default_r = isempty(gts) ? Float32(state.voxeldata[].voxel_spacing[1]) : gts[end].radius
                 push!(gts, ValveGate(position = new_pos, open_time = 0.0f0, radius = default_r))
                 state.dragged_gate[] = 0
-                state.gates[] = gts
-                state.solver_gates[] = copy(gts)
+                updated = with_computed_gate_delays(gts, state.voxeldata[])
+                state.gates[] = updated
+                state.solver_gates[] = updated
                 state.hovered_gate[] = length(gts)
             end
             return Consume(true)
@@ -907,8 +974,9 @@ function register_interaction_handlers!(state::AppState)
                     new_gts = copy(gts)
                     deleteat!(new_gts, target_idx)
                     state.dragged_gate[] = 0
-                    state.gates[] = new_gts
-                    state.solver_gates[] = copy(new_gts)
+                    updated = with_computed_gate_delays(gts, state.voxeldata[])
+                    state.gates[] = updated
+                    state.solver_gates[] = updated
                     state.hovered_gate[] = find_near_gate(state, mp)
                 end
             end
