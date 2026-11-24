@@ -438,26 +438,72 @@ end
 # 4. 3D Scene, Camera & Overlays
 # =============================================================================
 
-function configure_cad_camera!(lscene::LScene)
-    center!(lscene.scene)
+"""
+    fit_camera_to_mesh!(lscene::LScene, md::MeshData; view_dir = Vec3f(1.0f0, -1.2f0, 0.85f0))
+
+Computes the exact AABB of `md.mesh`, centers `cam.lookat[]` on the geometry's bounding-box
+center (even if imported far from `(0, 0, 0)`), and frames the part in an isometric view.
+"""
+function fit_camera_to_mesh!(
+    lscene::LScene,
+    md::MeshData;
+    view_dir::Vec3f = Vec3f(1.0f0, -1.2f0, 0.85f0)
+)
+    verts = md.mesh.position
+    isempty(verts) && return
+
+    pmin = Point3f(Inf32, Inf32, Inf32)
+    pmax = Point3f(-Inf32, -Inf32, -Inf32)
+    @inbounds for v in verts
+        p = Point3f(v)
+        pmin = min.(pmin, p)
+        pmax = max.(pmax, p)
+    end
+
+    bbox_center = 0.5f0 * (pmin + pmax)
+    diag = norm(pmax - pmin)
+    radius = max(0.5f0 * diag, 1.0f0)
+
     cam = cameracontrols(lscene.scene)
-    cam.settings.center[] = false
+    dir = normalize(view_dir)
+    dist = 2.2f0 * radius
+    eye = bbox_center + dir * dist
+
+    # Temporarily allow centering, update lookat/eye/up, and adjust orthographic zoom scale
+    was_centered = cam.settings.center[]
+    cam.settings.center[] = true
+    update_cam!(lscene.scene, cam, eye, bbox_center, Vec3f(0.0f0, 0.0f0, 1.0f0))
+    cam.settings.center[] = was_centered
+
+    # Ensure orthographic projection scale fits the entire bounding sphere
+    if hasproperty(cam, :ortho_zoom)
+        cam.ortho_zoom[] = 1.15f0 * radius
+    end
+
+    # Scale near/far clip planes relative to part size so off-origin parts never clip
+    cam.near[] = -10.0f0 * radius
+    cam.far[]  =  10.0f0 * radius
+    update_cam!(lscene.scene, cam)
+end
+
+function configure_cad_camera!(state::AppState)
+    lscene = state.lscene
+    cam = cameracontrols(lscene.scene)
+
     cam.settings.projectiontype[] = Makie.Orthographic
     cam.settings.cad[] = true
     cam.settings.zoom_shift_lookat[] = true
-    cam.controls.left_key[] = false
-    cam.controls.right_key[] = false
+
+    # Keep rotation centered on `cam.lookat[]` (the geometry center or clicked pivot)
+    if hasproperty(cam.settings, :rotation_center)
+        cam.settings.rotation_center[] = :lookat
+    end
+    # Prevent unwanted camera roll (keeps Z-up turntable behavior like SolidWorks/Fusion)
+    if hasproperty(cam.settings, :fixed_axis)
+        cam.settings.fixed_axis[] = true
+    end
     if hasproperty(cam.settings, :near_clip)
         cam.settings.near_clip[] = 1e-5
-    end
-    cam.near[] = -500.0f0
-    cam.far[]  = 5000.0f0
-
-    on(cam.eyeposition) do _
-        if cam.near[] > -500.0f0
-            cam.near[] = -500.0f0
-            cam.far[]  = 5000.0f0
-        end
     end
 
     for prop in (:up_key, :down_key, :left_key, :right_key, :forward_key, :backward_key)
@@ -465,7 +511,21 @@ function configure_cad_camera!(lscene::LScene)
             getproperty(cam.settings, prop)[] = Keyboard.unknown
         end
     end
-    update_cam!(lscene.scene, cam)
+
+    # Frame initial geometry around its true bounding-box center
+    fit_camera_to_mesh!(lscene, state.meshdata[])
+
+    # Keep near/far planes wide enough during pan/zoom
+    on(cam.eyeposition) do _
+        verts = state.meshdata[].mesh.position
+        isempty(verts) && return
+        bb = GeometryBasics.Rect3(verts)
+        r = max(0.5f0 * norm(bb.widths), 1.0f0)
+        if cam.near[] > -5.0f0 * r
+            cam.near[] = -10.0f0 * r
+            cam.far[]  =  10.0f0 * r
+        end
+    end
 end
 
 function build_gate_meshes(state::AppState)
@@ -578,7 +638,7 @@ function setup_3d_scene!(state::AppState)
         visible = @lift(!$(state.voxel_confirmed)),
     )
 
-    configure_cad_camera!(lscene)
+    configure_cad_camera!(state)
 
     state.gate_plot = mesh!(
         lscene,
@@ -762,6 +822,23 @@ function register_interaction_handlers!(state::AppState)
         end
     end
 
+    # Set orbit pivot to clicked CAD surface point on Right/Middle press (CAD style)
+    on(events(fig).mousebutton; priority = 15) do event
+        if event.action == Mouse.press && event.button == Mouse.middle
+            mp = events(fig).mouseposition[]
+            hit_pt = pick_surface_point(state, mp)
+            if hit_pt !== nothing
+                cam = cameracontrols(state.lscene.scene)
+                offset = cam.eyeposition[] - cam.lookat[]
+                cam.lookat[] = hit_pt
+                cam.eyeposition[] = hit_pt + offset
+                update_cam!(state.lscene.scene, cam)
+            end
+        end
+        return Consume(false) # Do NOT consume so Makie's orbit drag still starts!
+    end
+
+
     # Keyboard shortcuts: 'a' to add gate under cursor, 'd' to delete hovered gate
     on(events(state.lscene.scene).keyboardbutton; priority = 20) do event
         (state.voxel_confirmed[] && !state.textbox_focused[]) || return Consume(false)
@@ -794,6 +871,9 @@ function register_interaction_handlers!(state::AppState)
                     state.hovered_gate[] = find_near_gate(state, mp)
                 end
             end
+            return Consume(true)
+        elseif event.key == Keyboard.f
+            fit_camera_to_mesh!(state.lscene, state.meshdata[])
             return Consume(true)
         end
         return Consume(false)
