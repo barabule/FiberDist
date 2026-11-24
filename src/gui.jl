@@ -196,13 +196,7 @@ function main()
         )
     )
 
-    function first_triangle_centroid(md)
-        verts = GeometryBasics.coordinates(md.mesh)
-        faces = GeometryBasics.faces(md.mesh)
-        isempty(faces) && return Point3f(0, 0, 0)
-        f1 = faces[1]
-        return Point3f((verts[f1[1]] + verts[f1[2]] + verts[f1[3]]) / 3.0f0)
-    end
+    
 
     # --- Voxelization & Solver Gate State ---
     res = Observable(100)
@@ -449,39 +443,7 @@ function main()
         visible = voxel_confirmed,
     )
 
-    function find_near_gate(mp)
-        gts = gates[]
-        isempty(gts) && return 0
-
-        dx = Float32(voxeldata[].voxel_spacing[1])
-        vp_origin = Point2f(lscene.scene.viewport[].origin)
-        mouse_px = Point2f(mp[1], mp[2])
-        mouse_local = mouse_px - vp_origin
-
-        plt, _ = Makie.pick(lscene.scene, mouse_px)
-        hit_gate_mesh = (plt == gate_plot)
-
-        best_idx = 0
-        best_dist = Inf32
-        cam_view = cameracontrols(lscene.scene)
-        right_vec = Vec3f(normalize(cross(cam_view.lookat[] - cam_view.eyeposition[], cam_view.upvector[])))
-
-        for (idx, g) in enumerate(gts)
-            pos = Point3f(g.position)
-            r   = max(Float32(g.radius), dx)
-            p_scr = Point2f(Makie.project(lscene.scene, pos))
-            p_rad_scr = Point2f(Makie.project(lscene.scene, pos + r * right_vec))
-            r_px = max(norm(p_rad_scr - p_scr), 18.0f0)
-            d_px = norm(mouse_local - p_scr)
-
-            thresh = hit_gate_mesh ? max(r_px * 2.5f0, 45.0f0) : r_px
-            if d_px <= thresh && d_px < best_dist
-                best_dist = d_px
-                best_idx = idx
-            end
-        end
-        return best_idx
-    end
+    
 
     function pick_surface_point(mp)
         vp = lscene.scene.viewport[]
@@ -518,7 +480,7 @@ function main()
         if event.button == Mouse.left
             if event.action == Mouse.press
                 mp = events(fig).mouseposition[]
-                g_idx = find_near_gate(mp)
+                g_idx = find_near_gate(mp, voxeldata, lscene, gates, gate_plot)
                 if g_idx > 0
                     dragged_gate[] = g_idx
                     hovered_gate[] = g_idx
@@ -528,7 +490,7 @@ function main()
             elseif event.action == Mouse.release
                 if dragged_gate[] > 0
                     dragged_gate[] = 0
-                    hovered_gate[] = find_near_gate(events(fig).mouseposition[])
+                    hovered_gate[] = find_near_gate(events(fig).mouseposition[], voxeldata, lscene, gates, gate_plot) 
                     if gate_moved[]
                         gate_moved[] = false
                         solver_gates[] = copy(gates[]) # Run Eikonal solver once on release
@@ -557,7 +519,7 @@ function main()
             end
             return Consume(true)
         else
-            new_hover = find_near_gate(mp)
+            new_hover = find_near_gate(mp, voxeldata, lscene, gates, gate_plot)
             if hovered_gate[] != new_hover
                 hovered_gate[] = new_hover
             end
@@ -589,14 +551,14 @@ function main()
             gts = gates[]
             if length(gts) > 1
                 mp = events(fig).mouseposition[]
-                target_idx = hovered_gate[] > 0 ? hovered_gate[] : find_near_gate(mp)
+                target_idx = hovered_gate[] > 0 ? hovered_gate[] : find_near_gate(mp, voxeldata, lscene, gates, gate_plot)
                 if 1 <= target_idx <= length(gts)
                     new_gts = copy(gts)
                     deleteat!(new_gts, target_idx)
                     dragged_gate[] = 0
                     gates[] = new_gts
                     solver_gates[] = copy(new_gts)
-                    hovered_gate[] = find_near_gate(mp)
+                    hovered_gate[] = find_near_gate(mp, voxeldata, lscene, gates, gate_plot)
                 end
             end
             return Consume(true)
@@ -1407,3 +1369,47 @@ function compute_flow_line_len(md::MeshData)
     end
     return len / length(tris)
 end
+
+
+function first_triangle_centroid(md::MeshData)
+        verts = md.mesh.position
+        faces = md.mesh.faces
+        isempty(faces) && return Point3f(0, 0, 0)
+        f1 = first(faces)
+        return Point3f((verts[f1[1]] + verts[f1[2]] + verts[f1[3]]) / 3.0f0)
+end
+
+
+function find_near_gate(mp, voxeldata, lscene, gates, gate_plot)
+        gts = gates[]
+        isempty(gts) && return 0
+
+        dx = Float32(voxeldata[].voxel_spacing[1])
+        vp_origin = Point2f(lscene.scene.viewport[].origin)
+        mouse_px = Point2f(mp[1], mp[2])
+        mouse_local = mouse_px - vp_origin
+
+        plt, _ = Makie.pick(lscene.scene, mouse_px)
+        hit_gate_mesh = (plt == gate_plot)
+
+        best_idx = 0
+        best_dist = Inf32
+        cam_view = cameracontrols(lscene.scene)
+        right_vec = Vec3f(normalize(cross(cam_view.lookat[] - cam_view.eyeposition[], cam_view.upvector[])))
+
+        for (idx, g) in enumerate(gts)
+            pos = Point3f(g.position)
+            r   = max(Float32(g.radius), dx)
+            p_scr = Point2f(Makie.project(lscene.scene, pos))
+            p_rad_scr = Point2f(Makie.project(lscene.scene, pos + r * right_vec))
+            r_px = max(norm(p_rad_scr - p_scr), 18.0f0)
+            d_px = norm(mouse_local - p_scr)
+
+            thresh = hit_gate_mesh ? max(r_px * 2.5f0, 45.0f0) : r_px
+            if d_px <= thresh && d_px < best_dist
+                best_dist = d_px
+                best_idx = idx
+            end
+        end
+        return best_idx
+    end
