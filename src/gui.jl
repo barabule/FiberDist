@@ -1,3 +1,70 @@
+# =============================================================================
+# 1. Central Application State
+# =============================================================================
+
+mutable struct AppState
+    # Scenes & Main Plots
+    fig::Figure
+    lscene::LScene
+    overlay_scene::Scene
+    mesh_plot::Any
+    gate_plot::Any
+
+    # Geometry & CAD Import State
+    current_filepath::Observable{String}
+    is_cad_file::Observable{Bool}
+    cad_elem_size::Observable{Float64}
+    cad_min_curv::Observable{Float64}
+    cad_circle_pts::Observable{Int}
+    meshdata::Observable{MeshData}
+
+    # Voxelization & Solver State
+    res::Observable{Int}
+    voxel_confirmed::Observable{Bool}
+    voxeldata::Observable{VoxelData}
+    gates::Observable{Vector{ValveGate}}
+    solver_gates::Observable{Vector{ValveGate}}
+    last_stats::Base.RefValue{Any}
+    stats::Observable{Any}
+    vertex_itp_f32::Observable{Any}
+    fill_time::Observable{Vector{Float32}}
+    t_max::Observable{Float32}
+    color_limits::Observable{Tuple{Float32, Float32}}
+
+    # Visualization & Animation State
+    n_stops::Int
+    fill_step::Observable{Int}
+    cmap_name::Observable{Symbol}
+    base_cmap::Observable{Any}
+    mesh_cmap::Observable{Any}
+    is_playing::Observable{Bool}
+
+    # Slice Preview State
+    slice_axis::Observable{Int}
+    slice_idx::Observable{Int}
+    slice_max::Observable{Int}
+
+    # Diagnostic Overlays State
+    show_flow_dirs::Observable{Bool}
+    show_weld_lines::Observable{Bool}
+    show_air_traps::Observable{Bool}
+    flow_line_half_len::Observable{Float64}
+
+    # Interactive Input State
+    hovered_gate::Observable{Int}
+    dragged_gate::Base.RefValue{Int}
+    gate_moved::Base.RefValue{Bool}
+    textbox_focused::Base.RefValue{Bool}
+end
+
+const CAD_EXTS  = Set([".step", ".stp", ".iges", ".igs", ".brep"])
+const MESH_EXTS = Set([".stl", ".obj", ".ply", ".off", ".2dm", ".msh"])
+
+
+# =============================================================================
+# 2. Pure Helpers & Geometry Utilities
+# =============================================================================
+
 function set_overdraw_recursive!(plot::AbstractPlot)
     if haskey(plot.attributes, :overdraw)
         try
@@ -18,7 +85,6 @@ function set_overdraw_recursive!(scene::Scene)
         set_overdraw_recursive!(child)
     end
 end
-
 
 """
     align_flow_segments!(pts::Vector{Point3f}, st, dx::Float32; n_iters::Int = 2)
@@ -159,13 +225,98 @@ function align_flow_segments!(pts::Vector{Point3f}, st, dx::Float32; n_iters::In
     return pts
 end
 
-function main()
-    fig = Figure(size = (1400, 850))
+function compute_flow_line_len(md::MeshData)
+    pts, tris = md.mesh.position, md.mesh.faces
+    isempty(tris) && return 1.0
 
+    len = 0.0
+    for tri in tris
+        i1, i2, i3 = tri
+        e12 = pts[i1] - pts[i2]
+        e13 = pts[i1] - pts[i3]
+        e23 = pts[i2] - pts[i3]
+        lmax = max(dot(e12, e12), max(dot(e13, e13), dot(e23, e23)))
+        len += sqrt(lmax)
+    end
+    return len / length(tris)
+end
+
+function first_triangle_centroid(md::MeshData)
+    verts = md.mesh.position
+    faces = md.mesh.faces
+    isempty(faces) && return Point3f(0, 0, 0)
+    f1 = first(faces)
+    return Point3f((verts[f1[1]] + verts[f1[2]] + verts[f1[3]]) / 3.0f0)
+end
+
+function pick_surface_point(state::AppState, mp)
+    vp = state.lscene.scene.viewport[]
+    u = 2.0f0 * (Float32(mp[1]) - Float32(vp.origin[1])) / Float32(vp.widths[1]) - 1.0f0
+    v = 2.0f0 * (Float32(mp[2]) - Float32(vp.origin[2])) / Float32(vp.widths[2]) - 1.0f0
+    (-1.0f0 <= u <= 1.0f0 && -1.0f0 <= v <= 1.0f0) || return nothing
+
+    inv_pv = inv(state.lscene.scene.camera.projectionview[])
+    p_near_h = inv_pv * Vec4f(u, v, -1.0f0, 1.0f0)
+    p_far_h  = inv_pv * Vec4f(u, v,  1.0f0, 1.0f0)
+
+    p_near = Point3f(p_near_h[1], p_near_h[2], p_near_h[3]) / p_near_h[4]
+    p_far  = Point3f(p_far_h[1],  p_far_h[2],  p_far_h[3])  / p_far_h[4]
+
+    ray_vec = p_far - p_near
+    ray_len = norm(ray_vec)
+    ray_len > 1f-6 || return nothing
+
+    ray = Raycore.Ray(o = p_near, d = SVector{3, Float32}(ray_vec / ray_len))
+    hit_found, _, distance, _, _ = Raycore.closest_hit(state.meshdata[].tlas, ray)
+    hit_found || return nothing
+
+    return p_near + Float32(distance) * (ray_vec / ray_len)
+end
+
+function find_near_gate(state::AppState, mp)
+    gts = state.gates[]
+    isempty(gts) && return 0
+
+    dx = Float32(state.voxeldata[].voxel_spacing[1])
+    vp_origin = Point2f(state.lscene.scene.viewport[].origin)
+    mouse_px = Point2f(mp[1], mp[2])
+    mouse_local = mouse_px - vp_origin
+
+    plt, _ = Makie.pick(state.lscene.scene, mouse_px)
+    hit_gate_mesh = (plt == state.gate_plot)
+
+    best_idx = 0
+    best_dist = Inf32
+    cam_view = cameracontrols(state.lscene.scene)
+    right_vec = Vec3f(normalize(cross(cam_view.lookat[] - cam_view.eyeposition[], cam_view.upvector[])))
+
+    for (idx, g) in enumerate(gts)
+        pos = Point3f(g.position)
+        r   = max(Float32(g.radius), dx)
+        p_scr = Point2f(Makie.project(state.lscene.scene, pos))
+        p_rad_scr = Point2f(Makie.project(state.lscene.scene, pos + r * right_vec))
+        r_px = max(norm(p_rad_scr - p_scr), 18.0f0)
+        d_px = norm(mouse_local - p_scr)
+
+        thresh = hit_gate_mesh ? max(r_px * 2.5f0, 45.0f0) : r_px
+        if d_px <= thresh && d_px < best_dist
+            best_dist = d_px
+            best_idx = idx
+        end
+    end
+    return best_idx
+end
+
+
+# =============================================================================
+# 3. State Initialization & Reactive Data Pipeline
+# =============================================================================
+
+function init_app_state()::AppState
+    fig = Figure(size = (1400, 850))
     rowsize!(fig.layout, 1, Relative(1.0))
     rowgap!(fig.layout, 0)
 
-    # 1. Background 3D CAD Scene
     lscene = LScene(
         fig[1, 1];
         show_axis = false,
@@ -174,10 +325,7 @@ function main()
             clear = true,
         )
     )
-
-    # --- Geometry & Import State ---
-    CAD_EXTS  = Set([".step", ".stp", ".iges", ".igs", ".brep"])
-    MESH_EXTS = Set([".stl", ".obj", ".ply", ".off", ".2dm", ".msh"])
+    overlay_scene = Scene(fig.scene; clear = false, camera = campixel!)
 
     default_step = joinpath(pkgdir(@__MODULE__), "assets", "plate_with_ribs_2.step")
     current_filepath = Observable(default_step)
@@ -196,51 +344,28 @@ function main()
         )
     )
 
-    
-
-    # --- Voxelization & Solver Gate State ---
     res = Observable(100)
     voxel_confirmed = Observable(true)
-
-    voxeldata = lift(meshdata, res) do md, r
-        VoxelData(md; res = r)
-    end
+    voxeldata = lift((md, r) -> VoxelData(md; res = r), meshdata, res)
 
     init_pos = Point3f(first(meshdata[].mesh.position))
     init_r   = Float32(voxeldata[].voxel_spacing[1])
     gates = Observable([ValveGate(position = init_pos, open_time = 0.0f0, radius = init_r)])
     solver_gates = Observable(copy(gates[]))
 
-    flow_line_half_len = Observable(1.0)
-
-    on(meshdata) do md
-        c1 = first_triangle_centroid(md)
-        r_def = max(Float32(voxeldata[].voxel_spacing[1]), 1.5f0)
-        new_gates = [ValveGate(position = c1, open_time = 0.0f0, radius = r_def)]
-        dragged_gate[] = 0
-        gates[] = new_gates
-        solver_gates[] = copy(new_gates)
-        center!(lscene.scene)
-        flow_line_half_len[] = compute_flow_line_len(md)
-    end
-
-    last_stats = Ref(
+    last_stats = Ref{Any}(
         project_voxel_to_mesh_triangles(meshdata[], voxeldata[], solve_eikonal_fim_ka(voxeldata[], gates[]))
     )
 
     stats = lift(meshdata, voxeldata, solver_gates, voxel_confirmed) do md, vd, gts, confirmed
-        if !confirmed
-            return last_stats[]
-        end
+        confirmed || return last_stats[]
         sol = solve_eikonal_fim_ka(vd, gts)
         res_stats = project_voxel_to_mesh_triangles(md, vd, sol)
         last_stats[] = res_stats
         return res_stats
     end
 
-    vertex_itp_f32 = lift(meshdata) do md
-        AngleWeightInterpolator(md, Float32)
-    end
+    vertex_itp_f32 = lift(md -> AngleWeightInterpolator(md, Float32), meshdata)
 
     fill_time = lift(vertex_itp_f32, stats, meshdata, voxel_confirmed) do itp, st, md, confirmed
         n_verts = length(md.mesh.position)
@@ -251,25 +376,20 @@ function main()
         return itp(zeros(Float32, n_verts), st.fill_time)
     end
 
-
     t_max = lift(fill_time) do ft
         m = maximum(ft)
         isfinite(m) && m > 0.0f0 ? m : 1.0f0
     end
     color_limits = @lift((0.0f0, $t_max))
 
-    # --- Colormap & Voxel-Preview Transparent Mesh Mode ---
     n_stops = 30
     fill_step = Observable(n_stops)
     cmap_name = Observable(:turbo)
     unfilled_grey = RGBAf(0.78, 0.78, 0.80, 1.0)
     preview_grey  = RGBAf(0.72, 0.74, 0.78, 0.28)
 
-    base_cmap = lift(cmap_name) do cname
-        cgrad(cname, n_stops, categorical = true)
-    end
+    base_cmap = lift(cname -> cgrad(cname, n_stops, categorical = true), cmap_name)
 
-    # Updating a 30-color colormap texture is instantaneous and keeps GPU per-pixel interpolation smooth!
     mesh_cmap = lift(cmap_name, fill_step, voxel_confirmed) do cname, step, confirmed
         if !confirmed
             return cgrad(fill(preview_grey, n_stops), n_stops, categorical = true)
@@ -280,72 +400,45 @@ function main()
         cgrad(masked_colors, n_stops, categorical = true)
     end
 
-    mplot = mesh!(
-        lscene,
-        @lift($meshdata.mesh);
-        color = fill_time,
-        colorrange = color_limits,
-        colormap = mesh_cmap,
-        transparency = @lift(!$voxel_confirmed),
-        shading = true,
-    )
-
-
-
-    # --- 3D Voxel Slice Scatter Overlay ---
     slice_axis = Observable(3)
     slice_idx  = Observable(1)
-
-    slice_max = lift(voxeldata, slice_axis) do vd, ax
-        max(size(vd.grid, ax), 1)
-    end
+    slice_max  = lift((vd, ax) -> max(size(vd.grid, ax), 1), voxeldata, slice_axis)
 
     on(slice_max) do mx
         slice_idx[] = clamp(round(Int, mx / 2), 1, mx)
     end
 
-    voxel_slice_pts = lift(voxeldata, slice_axis, slice_idx, voxel_confirmed) do vd, ax, idx, confirmed
-        pts = Point3f[]
-        confirmed && return pts
-
-        grid = vd.grid
-        nx, ny, nz = size(grid)
-        dx, dy, dz = Float32.(vd.voxel_spacing)
-        c0 = Point3f(vd.corner)
-
-        if ax == 1 && 1 <= idx <= nx
-            @inbounds for k in 1:nz, j in 1:ny
-                if grid[idx, j, k]
-                    push!(pts, c0 + Vec3f((idx - 0.5f0) * dx, (j - 0.5f0) * dy, (k - 0.5f0) * dz))
-                end
-            end
-        elseif ax == 2 && 1 <= idx <= ny
-            @inbounds for k in 1:nz, i in 1:nx
-                if grid[i, idx, k]
-                    push!(pts, c0 + Vec3f((i - 0.5f0) * dx, (idx - 0.5f0) * dy, (k - 0.5f0) * dz))
-                end
-            end
-        elseif ax == 3 && 1 <= idx <= nz
-            @inbounds for j in 1:ny, i in 1:nx
-                if grid[i, j, idx]
-                    push!(pts, c0 + Vec3f((i - 0.5f0) * dx, (j - 0.5f0) * dy, (idx - 0.5f0) * dz))
-                end
-            end
-        end
-        return pts
-    end
-
-    scatter!(
-        lscene,
-        voxel_slice_pts;
-        color = RGBf(0.05, 0.05, 0.05),
-        markersize = 6.5,
-        strokewidth = 0,
-        overdraw = true,
-        visible = @lift(!$voxel_confirmed),
+    state = AppState(
+        fig, lscene, overlay_scene, nothing, nothing,
+        current_filepath, is_cad_file, cad_elem_size, cad_min_curv, cad_circle_pts, meshdata,
+        res, voxel_confirmed, voxeldata, gates, solver_gates, last_stats, stats,
+        vertex_itp_f32, fill_time, t_max, color_limits,
+        n_stops, fill_step, cmap_name, base_cmap, mesh_cmap, Observable(false),
+        slice_axis, slice_idx, slice_max,
+        Observable(false), Observable(false), Observable(false), Observable(compute_flow_line_len(meshdata[])),
+        Observable(0), Ref(0), Ref(false), Ref(false)
     )
 
-    ####################        Camera & Gates ############################
+    on(state.meshdata) do md
+        c1 = first_triangle_centroid(md)
+        r_def = max(Float32(state.voxeldata[].voxel_spacing[1]), 1.5f0)
+        new_gates = [ValveGate(position = c1, open_time = 0.0f0, radius = r_def)]
+        state.dragged_gate[] = 0
+        state.gates[] = new_gates
+        state.solver_gates[] = copy(new_gates)
+        center!(state.lscene.scene)
+        state.flow_line_half_len[] = compute_flow_line_len(md)
+    end
+
+    return state
+end
+
+
+# =============================================================================
+# 4. 3D Scene, Camera & Overlays
+# =============================================================================
+
+function configure_cad_camera!(lscene::LScene)
     center!(lscene.scene)
     cam = cameracontrols(lscene.scene)
     cam.settings.center[] = false
@@ -373,11 +466,10 @@ function main()
         end
     end
     update_cam!(lscene.scene, cam)
+end
 
-    hovered_gate = Observable(0)
-    dragged_gate = Ref(0)
-
-    gate_meshes = lift(gates, stats, voxeldata, hovered_gate) do gts, st, vd, h_idx
+function build_gate_meshes(state::AppState)
+    return lift(state.gates, state.stats, state.voxeldata, state.hovered_gate) do gts, st, vd, h_idx
         dx = Float32(vd.voxel_spacing[1])
         centroids = st.centroids
         normals   = st.normals
@@ -434,812 +526,80 @@ function main()
             GeometryBasics.mesh(all_pts, all_faces; color = all_cols)
         )
     end
+end
 
-    gate_plot = mesh!(
+function build_voxel_slice_points(state::AppState)
+    return lift(state.voxeldata, state.slice_axis, state.slice_idx, state.voxel_confirmed) do vd, ax, idx, confirmed
+        pts = Point3f[]
+        confirmed && return pts
+
+        grid = vd.grid
+        nx, ny, nz = size(grid)
+        dx, dy, dz = Float32.(vd.voxel_spacing)
+        c0 = Point3f(vd.corner)
+
+        if ax == 1 && 1 <= idx <= nx
+            @inbounds for k in 1:nz, j in 1:ny
+                grid[idx, j, k] && push!(pts, c0 + Vec3f((idx - 0.5f0) * dx, (j - 0.5f0) * dy, (k - 0.5f0) * dz))
+            end
+        elseif ax == 2 && 1 <= idx <= ny
+            @inbounds for k in 1:nz, i in 1:nx
+                grid[i, idx, k] && push!(pts, c0 + Vec3f((i - 0.5f0) * dx, (idx - 0.5f0) * dy, (k - 0.5f0) * dz))
+            end
+        elseif ax == 3 && 1 <= idx <= nz
+            @inbounds for j in 1:ny, i in 1:nx
+                grid[i, j, idx] && push!(pts, c0 + Vec3f((i - 0.5f0) * dx, (j - 0.5f0) * dy, (idx - 0.5f0) * dz))
+            end
+        end
+        return pts
+    end
+end
+
+function setup_3d_scene!(state::AppState)
+    lscene = state.lscene
+
+    state.mesh_plot = mesh!(
         lscene,
-        gate_meshes;
+        @lift($(state.meshdata).mesh);
+        color = state.fill_time,
+        colorrange = state.color_limits,
+        colormap = state.mesh_cmap,
+        transparency = @lift(!$(state.voxel_confirmed)),
+        shading = true,
+    )
+
+    scatter!(
+        lscene,
+        build_voxel_slice_points(state);
+        color = RGBf(0.05, 0.05, 0.05),
+        markersize = 6.5,
+        strokewidth = 0,
+        overdraw = true,
+        visible = @lift(!$(state.voxel_confirmed)),
+    )
+
+    configure_cad_camera!(lscene)
+
+    state.gate_plot = mesh!(
+        lscene,
+        build_gate_meshes(state);
         transparency = true,
         shading = true,
-        visible = voxel_confirmed,
+        visible = state.voxel_confirmed,
     )
 
-    
+    setup_diagnostic_overlays_3d!(state)
+end
 
-    function pick_surface_point(mp)
-        vp = lscene.scene.viewport[]
-        u = 2.0f0 * (Float32(mp[1]) - Float32(vp.origin[1])) / Float32(vp.widths[1]) - 1.0f0
-        v = 2.0f0 * (Float32(mp[2]) - Float32(vp.origin[2])) / Float32(vp.widths[2]) - 1.0f0
-        (-1.0f0 <= u <= 1.0f0 && -1.0f0 <= v <= 1.0f0) || return nothing
+function setup_diagnostic_overlays_3d!(state::AppState)
+    lscene = state.lscene
 
-        inv_pv = inv(lscene.scene.camera.projectionview[])
-        p_near_h = inv_pv * Vec4f(u, v, -1.0f0, 1.0f0)
-        p_far_h  = inv_pv * Vec4f(u, v,  1.0f0, 1.0f0)
-
-        p_near = Point3f(p_near_h[1], p_near_h[2], p_near_h[3]) / p_near_h[4]
-        p_far  = Point3f(p_far_h[1],  p_far_h[2],  p_far_h[3])  / p_far_h[4]
-
-        ray_vec = p_far - p_near
-        ray_len = norm(ray_vec)
-        ray_len > 1f-6 || return nothing
-
-        ray = Raycore.Ray(o = p_near, d = SVector{3, Float32}(ray_vec / ray_len))
-        hit_found, _, distance, _, _ = Raycore.closest_hit(meshdata[].tlas, ray)
-        hit_found || return nothing
-
-        return p_near + Float32(distance) * (ray_vec / ray_len)
-    end
-
-    # =========================================================================
-    # Gate Drag, Hover & Deferred Solver Trigger (Mouse Events)
-    # =========================================================================
-    gate_moved = Ref(false)
-
-    # --- Mouse Button: Start Drag on Press, Commit to Solver on Release ---
-    on(events(fig).mousebutton; priority = 10) do event
-        voxel_confirmed[] || return Consume(false)
-        if event.button == Mouse.left
-            if event.action == Mouse.press
-                mp = events(fig).mouseposition[]
-                g_idx = find_near_gate(mp, voxeldata, lscene, gates, gate_plot)
-                if g_idx > 0
-                    dragged_gate[] = g_idx
-                    hovered_gate[] = g_idx
-                    gate_moved[] = false
-                    return Consume(true)
-                end
-            elseif event.action == Mouse.release
-                if dragged_gate[] > 0
-                    dragged_gate[] = 0
-                    hovered_gate[] = find_near_gate(events(fig).mouseposition[], voxeldata, lscene, gates, gate_plot) 
-                    if gate_moved[]
-                        gate_moved[] = false
-                        solver_gates[] = copy(gates[]) # Run Eikonal solver once on release
-                    end
-                    return Consume(true)
-                end
-            end
-        end
-        return Consume(false)
-    end
-
-    # --- Mouse Position: Live Visual Drag & Hover Highlight (No Solver) ---
-    on(events(fig).mouseposition; priority = 10) do mp
-        voxel_confirmed[] || return Consume(false)
-        g_drag = dragged_gate[]
-        if g_drag > 0 && ispressed(fig, Mouse.left)
-            new_pos = pick_surface_point(mp)
-            if new_pos !== nothing && 1 <= g_drag <= length(gates[])
-                gts = copy(gates[])
-                old_g = gts[g_drag]
-                if sum(abs2, Point3f(old_g.position) - new_pos) > 1f-6
-                    gts[g_drag] = ValveGate(position = new_pos, open_time = old_g.open_time, radius = old_g.radius)
-                    gates[] = gts # Updates visual gate mesh only
-                    gate_moved[] = true
-                end
-            end
-            return Consume(true)
-        else
-            new_hover = find_near_gate(mp, voxeldata, lscene, gates, gate_plot)
-            if hovered_gate[] != new_hover
-                hovered_gate[] = new_hover
-            end
-            return Consume(false)
-        end
-    end
-    # =========================================================================
-
-    textbox_focused = Ref(false)
-
-    on(events(lscene.scene).keyboardbutton; priority = 20) do event
-        (voxel_confirmed[] && !textbox_focused[]) || return Consume(false)
-        event.action == Keyboard.press || return Consume(false)
-
-        if event.key == Keyboard.a
-            mp = events(fig).mouseposition[]
-            new_pos = pick_surface_point(mp)
-            if new_pos !== nothing
-                gts = copy(gates[])
-                default_r = isempty(gts) ? Float32(voxeldata[].voxel_spacing[1]) : gts[end].radius
-                push!(gts, ValveGate(position = new_pos, open_time = 0.0f0, radius = default_r))
-                dragged_gate[] = 0
-                gates[] = gts
-                solver_gates[] = copy(gts)
-                hovered_gate[] = length(gts)
-            end
-            return Consume(true)
-        elseif event.key == Keyboard.d
-            gts = gates[]
-            if length(gts) > 1
-                mp = events(fig).mouseposition[]
-                target_idx = hovered_gate[] > 0 ? hovered_gate[] : find_near_gate(mp, voxeldata, lscene, gates, gate_plot)
-                if 1 <= target_idx <= length(gts)
-                    new_gts = copy(gts)
-                    deleteat!(new_gts, target_idx)
-                    dragged_gate[] = 0
-                    gates[] = new_gts
-                    solver_gates[] = copy(new_gts)
-                    hovered_gate[] = find_near_gate(mp, voxeldata, lscene, gates, gate_plot)
-                end
-            end
-            return Consume(true)
-        end
-        return Consume(false)
-    end
-
-    # =========================================================================
-    # 3. Pixel-Space Overlay Scene
-    # =========================================================================
-    overlay_scene = Scene(fig.scene; clear = false, camera = campixel!)
-
-    # -------------------------------------------------------------------------
-    # PANEL 1 (Upper-Left): Geometry Import & CAD Remeshing
-    # -------------------------------------------------------------------------
-    left_panel_w = 230
-    geom_panel_h = @lift($is_cad_file ? 185 : 82)
-
-    geom_card_rect = lift(lscene.scene.viewport, geom_panel_h) do vp, h
-        x0 = vp.origin[1] + 14
-        y0 = vp.origin[2] + vp.widths[2] - h - 14
-        Rect2f(x0, y0, left_panel_w, h)
-    end
-
-    poly!(
-        overlay_scene,
-        geom_card_rect,
-        color = RGBAf(1.0, 1.0, 1.0, 0.90),
-        strokecolor = RGBAf(0.5, 0.5, 0.5, 0.4),
-        strokewidth = 1.0,
-        overdraw = true,
-    )
-
-    text!(
-        overlay_scene,
-        @lift(Point2f($geom_card_rect.origin[1] + 12, $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 16));
-        text = "Geometry",
-        fontsize = 13,
-        font = :bold,
-        color = :gray15,
-        align = (:left, :center),
-        overdraw = true,
-    )
-
-    btn_load = Button(
-        overlay_scene;
-        bbox = @lift(BBox(
-            $geom_card_rect.origin[1] + 12,
-            $geom_card_rect.origin[1] + left_panel_w - 12,
-            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 54,
-            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 30
-        )),
-        label = "Load Geometry...",
-        fontsize = 12,
-        tellwidth = false,
-        tellheight = false,
-    )
-    set_overdraw_recursive!(btn_load.blockscene)
-
-    text!(
-        overlay_scene,
-        @lift(Point2f($geom_card_rect.origin[1] + 12, $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 67));
-        text = @lift(basename($current_filepath)),
-        fontsize = 11,
-        color = :gray35,
-        align = (:left, :center),
-        overdraw = true,
-    )
-
-    text!(
-        overlay_scene,
-        @lift(Point2f($geom_card_rect.origin[1] + 12, $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 92));
-        text = "Element Size:",
-        fontsize = 11,
-        color = :gray20,
-        align = (:left, :center),
-        visible = is_cad_file,
-        overdraw = true,
-    )
-
-    tb_elem_size = Textbox(
-        overlay_scene;
-        bbox = @lift(BBox(
-            $geom_card_rect.origin[1] + 135,
-            $geom_card_rect.origin[1] + left_panel_w - 12,
-            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 103,
-            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 81
-        )),
-        stored_string = string(cad_elem_size[]),
-        placeholder = "2.0",
-        fontsize = 11,
-        tellwidth = false,
-        tellheight = false,
-    )
-    set_overdraw_recursive!(tb_elem_size.blockscene)
-
-    text!(
-        overlay_scene,
-        @lift(Point2f($geom_card_rect.origin[1] + 12, $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 118));
-        text = "Min Curvature:",
-        fontsize = 11,
-        color = :gray20,
-        align = (:left, :center),
-        visible = is_cad_file,
-        overdraw = true,
-    )
-
-    tb_min_curv = Textbox(
-        overlay_scene;
-        bbox = @lift(BBox(
-            $geom_card_rect.origin[1] + 135,
-            $geom_card_rect.origin[1] + left_panel_w - 12,
-            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 129,
-            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 107
-        )),
-        stored_string = string(cad_min_curv[]),
-        placeholder = "1.0",
-        fontsize = 11,
-        tellwidth = false,
-        tellheight = false,
-    )
-    set_overdraw_recursive!(tb_min_curv.blockscene)
-
-    btn_remesh = Button(
-        overlay_scene;
-        bbox = @lift(BBox(
-            $geom_card_rect.origin[1] + 12,
-            $geom_card_rect.origin[1] + left_panel_w - 12,
-            $geom_card_rect.origin[2] + 12,
-            $geom_card_rect.origin[2] + 38
-        )),
-        label = "Remesh CAD",
-        fontsize = 12,
-        tellwidth = false,
-        tellheight = false,
-    )
-    set_overdraw_recursive!(btn_remesh.blockscene)
-
-    function sync_cad_widgets!(show_cad::Bool)
-        for tb in (tb_elem_size, tb_min_curv)
-            for p in tb.blockscene.plots
-                p.visible[] = show_cad
-            end
-        end
-        for p in btn_remesh.blockscene.plots
-            p.visible[] = show_cad
-        end
-    end
-    on(sync_cad_widgets!, is_cad_file)
-
-    function run_cad_remesh!()
-        is_cad_file[] || return
-        es = tryparse(Float64, tb_elem_size.stored_string[])
-        mc = tryparse(Float64, tb_min_curv.stored_string[])
-        es !== nothing && es > 0 && (cad_elem_size[] = es)
-        mc !== nothing && mc > 0 && (cad_min_curv[] = mc)
-
-        voxel_confirmed[] = false
-        meshdata[] = load_step_mesh_as_surface(
-            current_filepath[];
-            target_element_size = cad_elem_size[],
-            min_curvature_size = cad_min_curv[],
-            min_circle_points = cad_circle_pts[],
-        )
-    end
-
-    on(btn_remesh.clicks) do _
-        run_cad_remesh!()
-    end
-
-    on(btn_load.clicks) do _
-        filepath = pick_file()
-        isempty(filepath) && return
-        isfile(filepath) || return
-
-        ext = lowercase(splitext(filepath)[2])
-        if ext in CAD_EXTS
-            current_filepath[] = filepath
-            is_cad_file[] = true
-            voxel_confirmed[] = false
-            meshdata[] = load_step_mesh_as_surface(
-                filepath;
-                target_element_size = cad_elem_size[],
-                min_curvature_size = cad_min_curv[],
-                min_circle_points = cad_circle_pts[],
-            )
-        elseif ext in MESH_EXTS
-            current_filepath[] = filepath
-            is_cad_file[] = false
-            voxel_confirmed[] = false
-            meshdata[] = MeshData(filepath)
-        else
-            return
-        end
-    end
-
-    # -------------------------------------------------------------------------
-    # PANEL 2 (Upper-Left, below Geometry): Voxelization & Slice Preview
-    # -------------------------------------------------------------------------
-    vox_panel_h = 166
-    vox_card_rect = lift(lscene.scene.viewport, geom_card_rect) do vp, g_rect
-        x0 = g_rect.origin[1]
-        y0 = g_rect.origin[2] - vox_panel_h - 12
-        Rect2f(x0, y0, left_panel_w, vox_panel_h)
-    end
-
-    poly!(
-        overlay_scene,
-        vox_card_rect,
-        color = RGBAf(1.0, 1.0, 1.0, 0.90),
-        strokecolor = RGBAf(0.5, 0.5, 0.5, 0.4),
-        strokewidth = 1.0,
-        overdraw = true,
-    )
-
-    text!(
-        overlay_scene,
-        @lift(Point2f($vox_card_rect.origin[1] + 12, $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 16));
-        text = "Voxelization",
-        fontsize = 13,
-        font = :bold,
-        color = :gray15,
-        align = (:left, :center),
-        overdraw = true,
-    )
-
-    text!(
-        overlay_scene,
-        @lift(Point2f($vox_card_rect.origin[1] + 12, $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 42));
-        text = "Max Voxels:",
-        fontsize = 11,
-        color = :gray20,
-        align = (:left, :center),
-        overdraw = true,
-    )
-
-    tb_res = Textbox(
-        overlay_scene;
-        bbox = @lift(BBox(
-            $vox_card_rect.origin[1] + 95,
-            $vox_card_rect.origin[1] + left_panel_w - 12,
-            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 54,
-            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 30
-        )),
-        stored_string = string(res[]),
-        placeholder = "100",
-        fontsize = 11,
-        tellwidth = false,
-        tellheight = false,
-    )
-    set_overdraw_recursive!(tb_res.blockscene)
-
-    for tb in (tb_elem_size, tb_min_curv, tb_res)
-        on(tb.focused) do f
-            textbox_focused[] = f
-        end
-    end
-
-    on(tb_res.stored_string) do s
-        val = tryparse(Int, strip(s))
-        if val !== nothing && 10 <= val <= 1000
-            voxel_confirmed[] = false
-            if res[] != val
-                res[] = val
-            end
-        end
-    end
-
-    btn_w3 = (left_panel_w - 24 - 12) / 3
-    btn_x = Button(
-        overlay_scene;
-        bbox = @lift(BBox(
-            $vox_card_rect.origin[1] + 12,
-            $vox_card_rect.origin[1] + 12 + btn_w3,
-            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 88,
-            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 64
-        )),
-        label = @lift($slice_axis == 1 ? "[X]" : "X"),
-        fontsize = 11,
-        tellwidth = false,
-        tellheight = false,
-    )
-    btn_y = Button(
-        overlay_scene;
-        bbox = @lift(BBox(
-            $vox_card_rect.origin[1] + 18 + btn_w3,
-            $vox_card_rect.origin[1] + 18 + 2 * btn_w3,
-            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 88,
-            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 64
-        )),
-        label = @lift($slice_axis == 2 ? "[Y]" : "Y"),
-        fontsize = 11,
-        tellwidth = false,
-        tellheight = false,
-    )
-    btn_z = Button(
-        overlay_scene;
-        bbox = @lift(BBox(
-            $vox_card_rect.origin[1] + 24 + 2 * btn_w3,
-            $vox_card_rect.origin[1] + left_panel_w - 12,
-            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 88,
-            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 64
-        )),
-        label = @lift($slice_axis == 3 ? "[Z]" : "Z"),
-        fontsize = 11,
-        tellwidth = false,
-        tellheight = false,
-    )
-    for b in (btn_x, btn_y, btn_z)
-        set_overdraw_recursive!(b.blockscene)
-    end
-
-    on(btn_x.clicks) do _
-        voxel_confirmed[] = false
-        slice_axis[] = 1
-    end
-    on(btn_y.clicks) do _
-        voxel_confirmed[] = false
-        slice_axis[] = 2
-    end
-    on(btn_z.clicks) do _
-        voxel_confirmed[] = false
-        slice_axis[] = 3
-    end
-
-    slice_slider = Slider(
-        overlay_scene;
-        bbox = @lift(BBox(
-            $vox_card_rect.origin[1] + 12,
-            $vox_card_rect.origin[1] + left_panel_w - 64,
-            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 118,
-            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 96
-        )),
-        range = @lift(1:$slice_max),
-        startvalue = slice_idx[],
-        tellwidth = false,
-        tellheight = false,
-    )
-    set_overdraw_recursive!(slice_slider.blockscene)
-
-    on(slice_slider.value) do val
-        slice_idx[] = val
-    end
-    on(slice_idx) do val
-        if slice_slider.value[] != val
-            set_close_to!(slice_slider, val)
-        end
-    end
-
-    text!(
-        overlay_scene,
-        @lift(Point2f($vox_card_rect.origin[1] + left_panel_w - 58, $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 107));
-        text = @lift("$( $slice_idx )/$( $slice_max )"),
-        fontsize = 10,
-        color = :gray25,
-        align = (:left, :center),
-        overdraw = true,
-    )
-
-    btn_vox_ok = Button(
-        overlay_scene;
-        bbox = @lift(BBox(
-            $vox_card_rect.origin[1] + 12,
-            $vox_card_rect.origin[1] + left_panel_w - 12,
-            $vox_card_rect.origin[2] + 12,
-            $vox_card_rect.origin[2] + 38
-        )),
-        label = @lift($voxel_confirmed ? "Confirmed ✓" : "OK (Run Solver)"),
-        fontsize = 12,
-        tellwidth = false,
-        tellheight = false,
-    )
-    set_overdraw_recursive!(btn_vox_ok.blockscene)
-
-    on(btn_vox_ok.clicks) do _
-        val = tryparse(Int, strip(tb_res.stored_string[]))
-        if val !== nothing && 10 <= val <= 1000 && res[] != val
-            res[] = val
-        end
-        voxel_confirmed[] = true
-    end
-
-    # --- A. Top-Right Floating Colorbar ---
-    bar_w, bar_h = 16, 260
-    card_w, card_h = 114, bar_h + 24
-
-    cb_card_rect = lift(lscene.scene.viewport) do vp
-        x0 = vp.origin[1] + vp.widths[1] - card_w - 14
-        y0 = vp.origin[2] + vp.widths[2] - card_h - 14
-        Rect2f(x0, y0, card_w, card_h)
-    end
-
-    cb_bbox = @lift(BBox(
-        $cb_card_rect.origin[1] + 12,
-        $cb_card_rect.origin[1] + $cb_card_rect.widths[1] - 10,
-        $cb_card_rect.origin[2] + 12,
-        $cb_card_rect.origin[2] + $cb_card_rect.widths[2] - 12
-    ))
-
-    poly!(
-        overlay_scene,
-        cb_card_rect,
-        color = RGBAf(1.0, 1.0, 1.0, 0.85),
-        strokecolor = RGBAf(0.5, 0.5, 0.5, 0.4),
-        strokewidth = 1.0,
-        overdraw = true,
-    )
-
-    cb = Colorbar(
-        overlay_scene;
-        bbox = cb_bbox,
-        limits = color_limits,
-        colormap = base_cmap,
-        width = bar_w,
-        height = bar_h,
-        halign = :left,
-        valign = :center,
-        label = "Fill Time",
-        tickformat = "{:.3f}",
-        ticklabelsize = 12,
-        labelsize = 13,
-        labelpadding = 6,
-        ticklabelpad = 6,
-        tickalign = 0,
-        tellwidth = false,
-        tellheight = false,
-    )
-    set_overdraw_recursive!(cb.blockscene)
-    on(color_limits) do _
-        set_overdraw_recursive!(cb.blockscene)
-    end
-
-    # --- B. Bottom Floating Fill-Time Animation Slider (30 stops) ---
-    slider_card_h = 54
-    slider_card_rect = lift(lscene.scene.viewport) do vp
-        w = clamp(vp.widths[1] * 0.52, 340.0, 680.0)
-        x0 = vp.origin[1] + (vp.widths[1] - w) * 0.5
-        y0 = vp.origin[2] + 16
-        Rect2f(x0, y0, w, slider_card_h)
-    end
-
-    poly!(
-        overlay_scene,
-        slider_card_rect,
-        color = RGBAf(1.0, 1.0, 1.0, 0.88),
-        strokecolor = RGBAf(0.5, 0.5, 0.5, 0.4),
-        strokewidth = 1.0,
-        overdraw = true,
-    )
-
-    btn_bbox = @lift(BBox(
-        $slider_card_rect.origin[1] + 12,
-        $slider_card_rect.origin[1] + 46,
-        $slider_card_rect.origin[2] + 11,
-        $slider_card_rect.origin[2] + $slider_card_rect.widths[2] - 11
-    ))
-
-    slider_bbox = @lift(BBox(
-        $slider_card_rect.origin[1] + 56,
-        $slider_card_rect.origin[1] + $slider_card_rect.widths[1] - 165,
-        $slider_card_rect.origin[2] + 11,
-        $slider_card_rect.origin[2] + $slider_card_rect.widths[2] - 11
-    ))
-
-    lbl_pos = @lift(Point2f(
-        $slider_card_rect.origin[1] + $slider_card_rect.widths[1] - 155,
-        $slider_card_rect.origin[2] + $slider_card_rect.widths[2] * 0.5
-    ))
-
-    is_playing = Observable(false)
-    play_btn = Button(
-        overlay_scene;
-        bbox = btn_bbox,
-        label = @lift($is_playing ? "||" : "▶"),
-        fontsize = 13,
-        tellwidth = false,
-        tellheight = false,
-    )
-
-    fill_slider = Slider(
-        overlay_scene;
-        bbox = slider_bbox,
-        range = 1:n_stops,
-        startvalue = n_stops,
-        tellwidth = false,
-        tellheight = false,
-    )
-
-    on(fill_slider.value) do val
-        fill_step[] = val
-    end
-
-    time_label_str = lift(fill_step, t_max) do step, tmax
-        frac = (step - 1) / (n_stops - 1)
-        t_cur = frac * tmax
-        pct = round(Int, frac * 100)
-        "$(round(t_cur; digits=3)) / $(round(tmax; digits=3)) ($(pct)%)"
-    end
-
-    text!(
-        overlay_scene,
-        lbl_pos;
-        text = time_label_str,
-        fontsize = 12,
-        color = :gray20,
-        align = (:left, :center),
-        overdraw = true,
-    )
-
-    set_overdraw_recursive!(play_btn.blockscene)
-    set_overdraw_recursive!(fill_slider.blockscene)
-
-    on(play_btn.clicks) do _
-        is_playing[] = !is_playing[]
-        if is_playing[]
-            @async begin
-                while is_playing[] && isopen(fig.scene)
-                    sleep(0.06)
-                    is_playing[] || break
-                    cur = fill_slider.value[]
-                    if cur < n_stops
-                        set_close_to!(fill_slider, cur + 1)
-                    else
-                        sleep(0.35)
-                        is_playing[] || break
-                        set_close_to!(fill_slider, 1)
-                    end
-                end
-            end
-        end
-    end
-
-    ########################   OVERLAYS     ##############################################
-    show_flow_dirs  = Observable(false)
-    show_weld_lines = Observable(false)
-    show_air_traps  = Observable(false)
-
-    panel_w = card_w + 26
-    panel_h = 150
-
-    panel_card_rect = lift(lscene.scene.viewport, cb_card_rect) do vp, cb_rect
-        x0 = vp.origin[1] + vp.widths[1] - panel_w - 14
-        y0 = cb_rect.origin[2] - panel_h - 12
-        Rect2f(x0, y0, panel_w, panel_h)
-    end
-
-    poly!(
-        overlay_scene,
-        panel_card_rect,
-        color = RGBAf(1.0, 1.0, 1.0, 0.88),
-        strokecolor = RGBAf(0.5, 0.5, 0.5, 0.4),
-        strokewidth = 1.0,
-        overdraw = true,
-    )
-
-    panel_title_pos = @lift(Point2f(
-        $panel_card_rect.origin[1] + 12,
-        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 18
-    ))
-
-    text!(
-        overlay_scene,
-        panel_title_pos;
-        text = "Overlays",
-        fontsize = 13,
-        font = :bold,
-        color = :gray15,
-        align = (:left, :center),
-        overdraw = true,
-    )
-
-    chk_flow_bbox = @lift(BBox(
-        $panel_card_rect.origin[1] + 12,
-        $panel_card_rect.origin[1] + 30,
-        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 52,
-        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 34
-    ))
-
-    chk_flow_lbl_pos = @lift(Point2f(
-        $panel_card_rect.origin[1] + 36,
-        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 43
-    ))
-
-    chk_flow = Checkbox(
-        overlay_scene;
-        bbox = chk_flow_bbox,
-        checked = show_flow_dirs[],
-        tellwidth = false,
-        tellheight = false,
-    )
-    on(chk_flow.checked) do val
-        show_flow_dirs[] = val
-    end
-    set_overdraw_recursive!(chk_flow.blockscene)
-
-    text!(
-        overlay_scene,
-        chk_flow_lbl_pos;
-        text = "Flow Direction",
-        fontsize = 12,
-        color = :gray20,
-        align = (:left, :center),
-        overdraw = true,
-    )
-
-    chk_weld_bbox = @lift(BBox(
-        $panel_card_rect.origin[1] + 12,
-        $panel_card_rect.origin[1] + 30,
-        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 80,
-        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 62
-    ))
-
-    chk_weld_lbl_pos = @lift(Point2f(
-        $panel_card_rect.origin[1] + 36,
-        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 71
-    ))
-
-    chk_weld = Checkbox(
-        overlay_scene;
-        bbox = chk_weld_bbox,
-        checked = show_weld_lines[],
-        tellwidth = false,
-        tellheight = false,
-    )
-    on(chk_weld.checked) do val
-        show_weld_lines[] = val
-    end
-    set_overdraw_recursive!(chk_weld.blockscene)
-
-    text!(
-        overlay_scene,
-        chk_weld_lbl_pos;
-        text = "Weld Lines",
-        fontsize = 12,
-        color = :gray20,
-        align = (:left, :center),
-        overdraw = true,
-    )
-
-    chk_air_bbox = @lift(BBox(
-        $panel_card_rect.origin[1] + 12,
-        $panel_card_rect.origin[1] + 30,
-        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 108,
-        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 90
-    ))
-
-    chk_air_lbl_pos = @lift(Point2f(
-        $panel_card_rect.origin[1] + 36,
-        $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 99
-    ))
-
-    chk_air = Checkbox(
-        overlay_scene;
-        bbox = chk_air_bbox,
-        checked = show_air_traps[],
-        tellwidth = false,
-        tellheight = false,
-    )
-    on(chk_air.checked) do val
-        show_air_traps[] = val
-    end
-    set_overdraw_recursive!(chk_air.blockscene)
-
-    text!(
-        overlay_scene,
-        chk_air_lbl_pos;
-        text = "Air Traps",
-        fontsize = 12,
-        color = :gray20,
-        align = (:left, :center),
-        overdraw = true,
-    )
-
-    flow_segments = lift(stats, voxeldata, show_flow_dirs, flow_line_half_len) do st, vd, visible, half_len
+    flow_segments = lift(state.stats, state.voxeldata, state.show_flow_dirs, state.flow_line_half_len) do st, vd, visible, half_len
         pts = Point3f[]
         visible || return pts
 
         dx = Float32(vd.voxel_spacing[1])
         normal_offset = 0.08f0 * dx
-        # half_len      = 0.35f0 * dx
-
         centroids = st.centroids
         normals   = st.normals
         flow_dirs = st.flow_dir
@@ -1250,10 +610,8 @@ function main()
             u_norm2 = sum(abs2, u)
             u_norm2 > 1f-6 || continue
 
-            n = normals[i]
-            p_mid = Point3f(centroids[i] + normal_offset * n)
+            p_mid = Point3f(centroids[i] + normal_offset * normals[i])
             step_vec = Vec3f((half_len / sqrt(u_norm2)) * u)
-
             push!(pts, p_mid - step_vec)
             push!(pts, p_mid + step_vec)
         end
@@ -1267,17 +625,16 @@ function main()
         flow_segments;
         color = RGBAf(0.08, 0.08, 0.08, 0.85),
         linewidth = 1.2,
-        visible = show_flow_dirs,
+        visible = state.show_flow_dirs,
     )
 
-    weld_segments = lift(stats, voxeldata, show_weld_lines) do st, vd, visible
+    weld_segments = lift(state.stats, state.voxeldata, state.show_weld_lines) do st, vd, visible
         pts = Point3f[]
         visible || return pts
 
         dx = Float32(vd.voxel_spacing[1])
         normal_offset = 0.12f0 * dx
         half_len      = 0.55f0 * dx
-
         centroids = st.centroids
         normals   = st.normals
         flow_dirs = st.flow_dir
@@ -1288,7 +645,6 @@ function main()
 
             n = normals[i]
             u = flow_dirs[i]
-
             t_seam = cross(n, u)
             t_norm2 = sum(abs2, t_seam)
 
@@ -1301,7 +657,6 @@ function main()
 
             p_mid = Point3f(centroids[i] + normal_offset * n)
             step_vec = Vec3f((half_len / sqrt(t_norm2)) * t_seam)
-
             push!(pts, p_mid - step_vec)
             push!(pts, p_mid + step_vec)
         end
@@ -1313,28 +668,26 @@ function main()
         weld_segments;
         color = RGBAf(1.0, 0.88, 0.0, 0.95),
         linewidth = 3.5,
-        visible = show_weld_lines,
+        visible = state.show_weld_lines,
     )
 
-    air_trap_pts = lift(stats, voxeldata, show_air_traps) do st, vd, visible
+    air_trap_pts = lift(state.stats, state.voxeldata, state.show_air_traps) do st, vd, visible
         pts = Point3f[]
         visible || return pts
 
         dx = Float32(vd.voxel_spacing[1])
         normal_offset = 0.15f0 * dx
-
         centroids = st.centroids
         normals   = st.normals
         air_mask  = st.masks.air_traps
 
         @inbounds for i in eachindex(centroids)
-            air_mask[i] || continue
-            push!(pts, Point3f(centroids[i] + normal_offset * normals[i]))
+            air_mask[i] && push!(pts, Point3f(centroids[i] + normal_offset * normals[i]))
         end
         return pts
     end
 
-    air_trap_radius = @lift(0.65f0 * Float32($voxeldata.voxel_spacing[1]))
+    air_trap_radius = @lift(0.65f0 * Float32($(state.voxeldata).voxel_spacing[1]))
 
     meshscatter!(
         lscene,
@@ -1344,72 +697,570 @@ function main()
         color = RGBAf(0.95, 0.12, 0.12, 0.55),
         transparency = true,
         shading = true,
-        visible = show_air_traps,
+        visible = state.show_air_traps,
     )
-
-    return fig
 end
 
 
-function compute_flow_line_len(md::MeshData)
+# =============================================================================
+# 5. Mouse & Keyboard Interaction Handlers
+# =============================================================================
 
-    pts, tris = md.mesh.position, md.mesh.faces
+function register_interaction_handlers!(state::AppState)
+    fig = state.fig
 
-    len = 0.0
-    for tri in tris
-        i1, i2, i3 = tri
-        e12 = pts[i1] - pts[i2]
-        e13 = pts[i1] - pts[i3]
-        e23 = pts[i2] - pts[i3]
-        l12 = dot(e12, e12)
-        l13 = dot(e13, e13)
-        l23 = dot(e23, e23)
-        lmax = max(l12, max(l13, l23))
-        len += sqrt(lmax)
-    end
-    return len / length(tris)
-end
-
-
-function first_triangle_centroid(md::MeshData)
-        verts = md.mesh.position
-        faces = md.mesh.faces
-        isempty(faces) && return Point3f(0, 0, 0)
-        f1 = first(faces)
-        return Point3f((verts[f1[1]] + verts[f1[2]] + verts[f1[3]]) / 3.0f0)
-end
-
-
-function find_near_gate(mp, voxeldata, lscene, gates, gate_plot)
-        gts = gates[]
-        isempty(gts) && return 0
-
-        dx = Float32(voxeldata[].voxel_spacing[1])
-        vp_origin = Point2f(lscene.scene.viewport[].origin)
-        mouse_px = Point2f(mp[1], mp[2])
-        mouse_local = mouse_px - vp_origin
-
-        plt, _ = Makie.pick(lscene.scene, mouse_px)
-        hit_gate_mesh = (plt == gate_plot)
-
-        best_idx = 0
-        best_dist = Inf32
-        cam_view = cameracontrols(lscene.scene)
-        right_vec = Vec3f(normalize(cross(cam_view.lookat[] - cam_view.eyeposition[], cam_view.upvector[])))
-
-        for (idx, g) in enumerate(gts)
-            pos = Point3f(g.position)
-            r   = max(Float32(g.radius), dx)
-            p_scr = Point2f(Makie.project(lscene.scene, pos))
-            p_rad_scr = Point2f(Makie.project(lscene.scene, pos + r * right_vec))
-            r_px = max(norm(p_rad_scr - p_scr), 18.0f0)
-            d_px = norm(mouse_local - p_scr)
-
-            thresh = hit_gate_mesh ? max(r_px * 2.5f0, 45.0f0) : r_px
-            if d_px <= thresh && d_px < best_dist
-                best_dist = d_px
-                best_idx = idx
+    # Gate selection, drag start, and solver trigger on release
+    on(events(fig).mousebutton; priority = 10) do event
+        state.voxel_confirmed[] || return Consume(false)
+        if event.button == Mouse.left
+            if event.action == Mouse.press
+                mp = events(fig).mouseposition[]
+                g_idx = find_near_gate(state, mp)
+                if g_idx > 0
+                    state.dragged_gate[] = g_idx
+                    state.hovered_gate[] = g_idx
+                    state.gate_moved[] = false
+                    return Consume(true)
+                end
+            elseif event.action == Mouse.release
+                if state.dragged_gate[] > 0
+                    state.dragged_gate[] = 0
+                    state.hovered_gate[] = find_near_gate(state, events(fig).mouseposition[])
+                    if state.gate_moved[]
+                        state.gate_moved[] = false
+                        state.solver_gates[] = copy(state.gates[])
+                    end
+                    return Consume(true)
+                end
             end
         end
-        return best_idx
+        return Consume(false)
     end
+
+    # Live visual gate drag and hover highlight
+    on(events(fig).mouseposition; priority = 10) do mp
+        state.voxel_confirmed[] || return Consume(false)
+        g_drag = state.dragged_gate[]
+        if g_drag > 0 && ispressed(fig, Mouse.left)
+            new_pos = pick_surface_point(state, mp)
+            if new_pos !== nothing && 1 <= g_drag <= length(state.gates[])
+                gts = copy(state.gates[])
+                old_g = gts[g_drag]
+                if sum(abs2, Point3f(old_g.position) - new_pos) > 1f-6
+                    gts[g_drag] = ValveGate(position = new_pos, open_time = old_g.open_time, radius = old_g.radius)
+                    state.gates[] = gts
+                    state.gate_moved[] = true
+                end
+            end
+            return Consume(true)
+        else
+            new_hover = find_near_gate(state, mp)
+            if state.hovered_gate[] != new_hover
+                state.hovered_gate[] = new_hover
+            end
+            return Consume(false)
+        end
+    end
+
+    # Keyboard shortcuts: 'a' to add gate under cursor, 'd' to delete hovered gate
+    on(events(state.lscene.scene).keyboardbutton; priority = 20) do event
+        (state.voxel_confirmed[] && !state.textbox_focused[]) || return Consume(false)
+        event.action == Keyboard.press || return Consume(false)
+
+        if event.key == Keyboard.a
+            mp = events(fig).mouseposition[]
+            new_pos = pick_surface_point(state, mp)
+            if new_pos !== nothing
+                gts = copy(state.gates[])
+                default_r = isempty(gts) ? Float32(state.voxeldata[].voxel_spacing[1]) : gts[end].radius
+                push!(gts, ValveGate(position = new_pos, open_time = 0.0f0, radius = default_r))
+                state.dragged_gate[] = 0
+                state.gates[] = gts
+                state.solver_gates[] = copy(gts)
+                state.hovered_gate[] = length(gts)
+            end
+            return Consume(true)
+        elseif event.key == Keyboard.d
+            gts = state.gates[]
+            if length(gts) > 1
+                mp = events(fig).mouseposition[]
+                target_idx = state.hovered_gate[] > 0 ? state.hovered_gate[] : find_near_gate(state, mp)
+                if 1 <= target_idx <= length(gts)
+                    new_gts = copy(gts)
+                    deleteat!(new_gts, target_idx)
+                    state.dragged_gate[] = 0
+                    state.gates[] = new_gts
+                    state.solver_gates[] = copy(new_gts)
+                    state.hovered_gate[] = find_near_gate(state, mp)
+                end
+            end
+            return Consume(true)
+        end
+        return Consume(false)
+    end
+end
+
+
+# =============================================================================
+# 6. Modular HUD / Overlay Panels
+# =============================================================================
+
+function draw_panel_card!(overlay_scene::Scene, rect::Observable{Rect2f}; alpha::Float64 = 0.90)
+    poly!(
+        overlay_scene,
+        rect,
+        color = RGBAf(1.0, 1.0, 1.0, alpha),
+        strokecolor = RGBAf(0.5, 0.5, 0.5, 0.4),
+        strokewidth = 1.0,
+        overdraw = true,
+    )
+end
+
+function track_textbox_focus!(state::AppState, tbs...)
+    for tb in tbs
+        on(tb.focused) do f
+            state.textbox_focused[] = f
+        end
+    end
+end
+
+function build_geometry_panel!(state::AppState, left_panel_w::Int)
+    sc = state.overlay_scene
+    geom_panel_h = @lift($(state.is_cad_file) ? 185 : 82)
+
+    geom_card_rect = lift(state.lscene.scene.viewport, geom_panel_h) do vp, h
+        x0 = vp.origin[1] + 14
+        y0 = vp.origin[2] + vp.widths[2] - h - 14
+        Rect2f(x0, y0, left_panel_w, h)
+    end
+    draw_panel_card!(sc, geom_card_rect; alpha = 0.90)
+
+    text!(
+        sc,
+        @lift(Point2f($geom_card_rect.origin[1] + 12, $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 16));
+        text = "Geometry", fontsize = 13, font = :bold, color = :gray15,
+        align = (:left, :center), overdraw = true,
+    )
+
+    btn_load = Button(
+        sc;
+        bbox = @lift(BBox(
+            $geom_card_rect.origin[1] + 12, $geom_card_rect.origin[1] + left_panel_w - 12,
+            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 54,
+            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 30
+        )),
+        label = "Load Geometry...", fontsize = 12, tellwidth = false, tellheight = false,
+    )
+    set_overdraw_recursive!(btn_load.blockscene)
+
+    text!(
+        sc,
+        @lift(Point2f($geom_card_rect.origin[1] + 12, $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 67));
+        text = @lift(basename($(state.current_filepath))), fontsize = 11, color = :gray35,
+        align = (:left, :center), overdraw = true,
+    )
+
+    text!(
+        sc,
+        @lift(Point2f($geom_card_rect.origin[1] + 12, $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 92));
+        text = "Element Size:", fontsize = 11, color = :gray20,
+        align = (:left, :center), visible = state.is_cad_file, overdraw = true,
+    )
+
+    tb_elem_size = Textbox(
+        sc;
+        bbox = @lift(BBox(
+            $geom_card_rect.origin[1] + 135, $geom_card_rect.origin[1] + left_panel_w - 12,
+            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 103,
+            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 81
+        )),
+        stored_string = string(state.cad_elem_size[]), placeholder = "2.0",
+        fontsize = 11, tellwidth = false, tellheight = false,
+    )
+    set_overdraw_recursive!(tb_elem_size.blockscene)
+
+    text!(
+        sc,
+        @lift(Point2f($geom_card_rect.origin[1] + 12, $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 118));
+        text = "Min Curvature:", fontsize = 11, color = :gray20,
+        align = (:left, :center), visible = state.is_cad_file, overdraw = true,
+    )
+
+    tb_min_curv = Textbox(
+        sc;
+        bbox = @lift(BBox(
+            $geom_card_rect.origin[1] + 135, $geom_card_rect.origin[1] + left_panel_w - 12,
+            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 129,
+            $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 107
+        )),
+        stored_string = string(state.cad_min_curv[]), placeholder = "1.0",
+        fontsize = 11, tellwidth = false, tellheight = false,
+    )
+    set_overdraw_recursive!(tb_min_curv.blockscene)
+
+    btn_remesh = Button(
+        sc;
+        bbox = @lift(BBox(
+            $geom_card_rect.origin[1] + 12, $geom_card_rect.origin[1] + left_panel_w - 12,
+            $geom_card_rect.origin[2] + 12, $geom_card_rect.origin[2] + 38
+        )),
+        label = "Remesh CAD", fontsize = 12, tellwidth = false, tellheight = false,
+    )
+    set_overdraw_recursive!(btn_remesh.blockscene)
+    track_textbox_focus!(state, tb_elem_size, tb_min_curv)
+
+    on(state.is_cad_file) do show_cad
+        for widget in (tb_elem_size, tb_min_curv, btn_remesh)
+            for p in widget.blockscene.plots
+                p.visible[] = show_cad
+            end
+        end
+    end
+
+    on(btn_remesh.clicks) do _
+        state.is_cad_file[] || return
+        es = tryparse(Float64, tb_elem_size.stored_string[])
+        mc = tryparse(Float64, tb_min_curv.stored_string[])
+        es !== nothing && es > 0 && (state.cad_elem_size[] = es)
+        mc !== nothing && mc > 0 && (state.cad_min_curv[] = mc)
+
+        state.voxel_confirmed[] = false
+        state.meshdata[] = load_step_mesh_as_surface(
+            state.current_filepath[];
+            target_element_size = state.cad_elem_size[],
+            min_curvature_size = state.cad_min_curv[],
+            min_circle_points = state.cad_circle_pts[],
+        )
+    end
+
+    on(btn_load.clicks) do _
+        filepath = pick_file()
+        (isempty(filepath) || !isfile(filepath)) && return
+
+        ext = lowercase(splitext(filepath)[2])
+        if ext in CAD_EXTS
+            state.current_filepath[] = filepath
+            state.is_cad_file[] = true
+            state.voxel_confirmed[] = false
+            state.meshdata[] = load_step_mesh_as_surface(
+                filepath;
+                target_element_size = state.cad_elem_size[],
+                min_curvature_size = state.cad_min_curv[],
+                min_circle_points = state.cad_circle_pts[],
+            )
+        elseif ext in MESH_EXTS
+            state.current_filepath[] = filepath
+            state.is_cad_file[] = false
+            state.voxel_confirmed[] = false
+            state.meshdata[] = MeshData(filepath)
+        end
+    end
+
+    return geom_card_rect
+end
+
+function build_voxel_panel!(state::AppState, geom_card_rect::Observable{Rect2f}, left_panel_w::Int)
+    sc = state.overlay_scene
+    vox_panel_h = 166
+
+    vox_card_rect = lift(geom_card_rect) do g_rect
+        Rect2f(g_rect.origin[1], g_rect.origin[2] - vox_panel_h - 12, left_panel_w, vox_panel_h)
+    end
+    draw_panel_card!(sc, vox_card_rect; alpha = 0.90)
+
+    text!(
+        sc,
+        @lift(Point2f($vox_card_rect.origin[1] + 12, $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 16));
+        text = "Voxelization", fontsize = 13, font = :bold, color = :gray15,
+        align = (:left, :center), overdraw = true,
+    )
+
+    text!(
+        sc,
+        @lift(Point2f($vox_card_rect.origin[1] + 12, $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 42));
+        text = "Max Voxels:", fontsize = 11, color = :gray20,
+        align = (:left, :center), overdraw = true,
+    )
+
+    tb_res = Textbox(
+        sc;
+        bbox = @lift(BBox(
+            $vox_card_rect.origin[1] + 95, $vox_card_rect.origin[1] + left_panel_w - 12,
+            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 54,
+            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 30
+        )),
+        stored_string = string(state.res[]), placeholder = "100",
+        fontsize = 11, tellwidth = false, tellheight = false,
+    )
+    set_overdraw_recursive!(tb_res.blockscene)
+    track_textbox_focus!(state, tb_res)
+
+    on(tb_res.stored_string) do s
+        val = tryparse(Int, strip(s))
+        if val !== nothing && 10 <= val <= 1000
+            state.voxel_confirmed[] = false
+            state.res[] != val && (state.res[] = val)
+        end
+    end
+
+    btn_w3 = (left_panel_w - 36) / 3
+    axis_labels = ("X", "Y", "Z")
+    for ax in 1:3
+        x_left  = 12 + (ax - 1) * (btn_w3 + 6)
+        x_right = ax == 3 ? (left_panel_w - 12) : (x_left + btn_w3)
+        lbl_str = axis_labels[ax]
+
+        btn = Button(
+            sc;
+            bbox = @lift(BBox(
+                $vox_card_rect.origin[1] + x_left, $vox_card_rect.origin[1] + x_right,
+                $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 88,
+                $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 64
+            )),
+            label = @lift($(state.slice_axis) == ax ? "[$lbl_str]" : lbl_str),
+            fontsize = 11, tellwidth = false, tellheight = false,
+        )
+        set_overdraw_recursive!(btn.blockscene)
+        on(btn.clicks) do _
+            state.voxel_confirmed[] = false
+            state.slice_axis[] = ax
+        end
+    end
+
+    slice_slider = Slider(
+        sc;
+        bbox = @lift(BBox(
+            $vox_card_rect.origin[1] + 12, $vox_card_rect.origin[1] + left_panel_w - 64,
+            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 118,
+            $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 96
+        )),
+        range = @lift(1:$(state.slice_max)),
+        startvalue = state.slice_idx[],
+        tellwidth = false, tellheight = false,
+    )
+    set_overdraw_recursive!(slice_slider.blockscene)
+
+    on(slice_slider.value) do val
+        state.slice_idx[] = val
+    end
+    on(state.slice_idx) do val
+        slice_slider.value[] != val && set_close_to!(slice_slider, val)
+    end
+
+    text!(
+        sc,
+        @lift(Point2f($vox_card_rect.origin[1] + left_panel_w - 58, $vox_card_rect.origin[2] + $vox_card_rect.widths[2] - 107));
+        text = @lift("$( $(state.slice_idx) )/$( $(state.slice_max) )"),
+        fontsize = 10, color = :gray25, align = (:left, :center), overdraw = true,
+    )
+
+    btn_vox_ok = Button(
+        sc;
+        bbox = @lift(BBox(
+            $vox_card_rect.origin[1] + 12, $vox_card_rect.origin[1] + left_panel_w - 12,
+            $vox_card_rect.origin[2] + 12, $vox_card_rect.origin[2] + 38
+        )),
+        label = @lift($(state.voxel_confirmed) ? "Confirmed ✓" : "OK (Run Solver)"),
+        fontsize = 12, tellwidth = false, tellheight = false,
+    )
+    set_overdraw_recursive!(btn_vox_ok.blockscene)
+
+    on(btn_vox_ok.clicks) do _
+        val = tryparse(Int, strip(tb_res.stored_string[]))
+        if val !== nothing && 10 <= val <= 1000 && state.res[] != val
+            state.res[] = val
+        end
+        state.voxel_confirmed[] = true
+    end
+end
+
+function build_colorbar_panel!(state::AppState, card_w::Int)
+    sc = state.overlay_scene
+    bar_w, bar_h = 16, 260
+    card_h = bar_h + 24
+
+    cb_card_rect = lift(state.lscene.scene.viewport) do vp
+        x0 = vp.origin[1] + vp.widths[1] - card_w - 14
+        y0 = vp.origin[2] + vp.widths[2] - card_h - 14
+        Rect2f(x0, y0, card_w, card_h)
+    end
+    draw_panel_card!(sc, cb_card_rect; alpha = 0.85)
+
+    cb = Colorbar(
+        sc;
+        bbox = @lift(BBox(
+            $cb_card_rect.origin[1] + 12, $cb_card_rect.origin[1] + $cb_card_rect.widths[1] - 10,
+            $cb_card_rect.origin[2] + 12, $cb_card_rect.origin[2] + $cb_card_rect.widths[2] - 12
+        )),
+        limits = state.color_limits,
+        colormap = state.base_cmap,
+        width = bar_w, height = bar_h,
+        halign = :left, valign = :center,
+        label = "Fill Time",
+        tickformat = "{:.3f}",
+        ticklabelsize = 12, labelsize = 13,
+        labelpadding = 6, ticklabelpad = 6, tickalign = 0,
+        tellwidth = false, tellheight = false,
+    )
+    set_overdraw_recursive!(cb.blockscene)
+    on(state.color_limits) do _
+        set_overdraw_recursive!(cb.blockscene)
+    end
+
+    return cb_card_rect
+end
+
+function build_timeline_panel!(state::AppState)
+    sc = state.overlay_scene
+    slider_card_h = 54
+
+    slider_card_rect = lift(state.lscene.scene.viewport) do vp
+        w = clamp(vp.widths[1] * 0.52, 340.0, 680.0)
+        x0 = vp.origin[1] + (vp.widths[1] - w) * 0.5
+        y0 = vp.origin[2] + 16
+        Rect2f(x0, y0, w, slider_card_h)
+    end
+    draw_panel_card!(sc, slider_card_rect; alpha = 0.88)
+
+    play_btn = Button(
+        sc;
+        bbox = @lift(BBox(
+            $slider_card_rect.origin[1] + 12, $slider_card_rect.origin[1] + 46,
+            $slider_card_rect.origin[2] + 11, $slider_card_rect.origin[2] + $slider_card_rect.widths[2] - 11
+        )),
+        label = @lift($(state.is_playing) ? "||" : "▶"),
+        fontsize = 13, tellwidth = false, tellheight = false,
+    )
+
+    fill_slider = Slider(
+        sc;
+        bbox = @lift(BBox(
+            $slider_card_rect.origin[1] + 56, $slider_card_rect.origin[1] + $slider_card_rect.widths[1] - 165,
+            $slider_card_rect.origin[2] + 11, $slider_card_rect.origin[2] + $slider_card_rect.widths[2] - 11
+        )),
+        range = 1:state.n_stops,
+        startvalue = state.n_stops,
+        tellwidth = false, tellheight = false,
+    )
+    set_overdraw_recursive!(play_btn.blockscene)
+    set_overdraw_recursive!(fill_slider.blockscene)
+
+    on(fill_slider.value) do val
+        state.fill_step[] = val
+    end
+
+    time_label_str = lift(state.fill_step, state.t_max) do step, tmax
+        frac = (step - 1) / (state.n_stops - 1)
+        t_cur = frac * tmax
+        pct = round(Int, frac * 100)
+        "$(round(t_cur; digits=3)) / $(round(tmax; digits=3)) ($(pct)%)"
+    end
+
+    text!(
+        sc,
+        @lift(Point2f(
+            $slider_card_rect.origin[1] + $slider_card_rect.widths[1] - 155,
+            $slider_card_rect.origin[2] + $slider_card_rect.widths[2] * 0.5
+        ));
+        text = time_label_str, fontsize = 12, color = :gray20,
+        align = (:left, :center), overdraw = true,
+    )
+
+    on(play_btn.clicks) do _
+        state.is_playing[] = !state.is_playing[]
+        if state.is_playing[]
+            @async begin
+                while state.is_playing[] && isopen(state.fig.scene)
+                    sleep(0.06)
+                    state.is_playing[] || break
+                    cur = fill_slider.value[]
+                    if cur < state.n_stops
+                        set_close_to!(fill_slider, cur + 1)
+                    else
+                        sleep(0.35)
+                        state.is_playing[] || break
+                        set_close_to!(fill_slider, 1)
+                    end
+                end
+            end
+        end
+    end
+end
+
+function build_overlays_panel!(state::AppState, cb_card_rect::Observable{Rect2f}, card_w::Int)
+    sc = state.overlay_scene
+    panel_w = card_w + 26
+    panel_h = 150
+
+    panel_card_rect = lift(state.lscene.scene.viewport, cb_card_rect) do vp, cb_rect
+        x0 = vp.origin[1] + vp.widths[1] - panel_w - 14
+        y0 = cb_rect.origin[2] - panel_h - 12
+        Rect2f(x0, y0, panel_w, panel_h)
+    end
+    draw_panel_card!(sc, panel_card_rect; alpha = 0.88)
+
+    text!(
+        sc,
+        @lift(Point2f($panel_card_rect.origin[1] + 12, $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - 18));
+        text = "Overlays", fontsize = 13, font = :bold, color = :gray15,
+        align = (:left, :center), overdraw = true,
+    )
+
+    items = (
+        ("Flow Direction", state.show_flow_dirs),
+        ("Weld Lines",     state.show_weld_lines),
+        ("Air Traps",      state.show_air_traps),
+    )
+
+    for (idx, (label_txt, obs)) in enumerate(items)
+        y_top = 34 + (idx - 1) * 28
+        y_bot = y_top + 18
+        y_mid = 0.5 * (y_top + y_bot)
+
+        chk = Checkbox(
+            sc;
+            bbox = @lift(BBox(
+                $panel_card_rect.origin[1] + 12, $panel_card_rect.origin[1] + 30,
+                $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - y_bot,
+                $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - y_top
+            )),
+            checked = obs[], tellwidth = false, tellheight = false,
+        )
+        on(chk.checked) do val
+            obs[] = val
+        end
+        set_overdraw_recursive!(chk.blockscene)
+
+        text!(
+            sc,
+            @lift(Point2f($panel_card_rect.origin[1] + 36, $panel_card_rect.origin[2] + $panel_card_rect.widths[2] - y_mid));
+            text = label_txt, fontsize = 12, color = :gray20,
+            align = (:left, :center), overdraw = true,
+        )
+    end
+end
+
+function build_hud!(state::AppState)
+    left_panel_w = 230
+    cb_card_w    = 114
+
+    geom_rect = build_geometry_panel!(state, left_panel_w)
+    build_voxel_panel!(state, geom_rect, left_panel_w)
+
+    cb_rect = build_colorbar_panel!(state, cb_card_w)
+    build_overlays_panel!(state, cb_rect, cb_card_w)
+    build_timeline_panel!(state)
+end
+
+
+# =============================================================================
+# 7. Entry Point
+# =============================================================================
+
+function main()
+    state = init_app_state()
+    setup_3d_scene!(state)
+    register_interaction_handlers!(state)
+    build_hud!(state)
+    return state.fig
+end
