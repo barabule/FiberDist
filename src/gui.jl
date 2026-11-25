@@ -1385,7 +1385,8 @@ end
 function build_colorbar_panel!(state::AppState, card_w::Int)
     sc = state.overlay_scene
     bar_w, bar_h = 16, 260
-    card_h = bar_h + 24
+    menu_h = 26
+    card_h = bar_h + menu_h + 34
 
     cb_card_rect = lift(state.lscene.scene.viewport) do vp
         x0 = vp.origin[1] + vp.widths[1] - card_w - 14
@@ -1394,11 +1395,38 @@ function build_colorbar_panel!(state::AppState, card_w::Int)
     end
     draw_panel_card!(sc, cb_card_rect; alpha = 0.85)
 
+    cmap_options = zip(
+        ["turbo", "glasbey", "batlowWS"],
+        [:turbo, :glasbey_bw_minc_20_minl_30_n256, :batlowWS],
+    )
+    cmap_menu = Menu(
+        sc;
+        bbox = @lift(BBox(
+            $cb_card_rect.origin[1] + 10, $cb_card_rect.origin[1] + $cb_card_rect.widths[1] - 10,
+            $cb_card_rect.origin[2] + $cb_card_rect.widths[2] - 12 - menu_h,
+            $cb_card_rect.origin[2] + $cb_card_rect.widths[2] - 12
+        )),
+        options = cmap_options,
+        default = "turbo",
+        direction = :down,
+        fontsize = 11,
+        textpadding = (6, 6, 4, 4),
+        tellwidth = false,
+        tellheight = false,
+    )
+    set_overdraw_recursive!(cmap_menu.blockscene)
+    on(cmap_menu.is_open) do _
+        set_overdraw_recursive!(cmap_menu.blockscene)
+    end
+    on(cmap_menu.selection) do sel
+        sel !== nothing && (state.cmap_name[] = sel)
+    end
+
     cb = Colorbar(
         sc;
         bbox = @lift(BBox(
             $cb_card_rect.origin[1] + 12, $cb_card_rect.origin[1] + $cb_card_rect.widths[1] - 10,
-            $cb_card_rect.origin[2] + 12, $cb_card_rect.origin[2] + $cb_card_rect.widths[2] - 12
+            $cb_card_rect.origin[2] + 12, $cb_card_rect.origin[2] + $cb_card_rect.widths[2] - 22 - menu_h
         )),
         limits = state.color_limits,
         colormap = state.base_cmap,
@@ -1497,7 +1525,7 @@ end
 
 function build_overlays_panel!(state::AppState, cb_card_rect::Observable{Rect2f}, card_w::Int)
     sc = state.overlay_scene
-    panel_w = card_w + 26
+    panel_w = card_w
     panel_h = 150
 
     panel_card_rect = lift(state.lscene.scene.viewport, cb_card_rect) do vp, cb_rect
@@ -1551,7 +1579,7 @@ end
 
 function build_hud!(state::AppState)
     left_panel_w = 260
-    cb_card_w    = 114
+    cb_card_w    = 140
 
     geom_rect = build_geometry_panel!(state, left_panel_w)
     build_voxel_panel!(state, geom_rect, left_panel_w)
