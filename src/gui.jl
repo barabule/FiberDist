@@ -1489,8 +1489,8 @@ function build_colorbar_panel!(state::AppState, card_w::Int)
     draw_panel_card!(sc, cb_card_rect; alpha = 0.85)
 
     cmap_options = zip(
-        ["turbo", "glasbey", "batlowWS"],
-        [:turbo, :glasbey_bw_minc_20_minl_30_n256, :batlowWS],
+        ["turbo", "glasbey", "batlowWS", "rainbow", "fastie"],
+        [:turbo, :glasbey_bw_minc_20_minl_30_n256, :batlowWS, :rainbow_bgyrm_35_85_c71_n256, :fastie],
     )
     cmap_menu = Menu(
         sc;
