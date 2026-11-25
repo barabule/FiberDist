@@ -2,13 +2,13 @@
 # 1. Central Application State
 # =============================================================================
 
-mutable struct AppState
+Base.@kwdef mutable struct AppState
     # Scenes & Main Plots
     fig::Figure
     lscene::LScene
     overlay_scene::Scene
-    mesh_plot::Any
-    gate_plot::Any
+    mesh_plot::Any = nothing
+    gate_plot::Any = nothing
 
     # Geometry & CAD Import State
     current_filepath::Observable{String}
@@ -37,7 +37,7 @@ mutable struct AppState
     cmap_name::Observable{Symbol}
     base_cmap::Observable{Any}
     mesh_cmap::Observable{Any}
-    is_playing::Observable{Bool}
+    is_playing::Observable{Bool} = Observable(false)
 
     # Slice Preview State
     slice_axis::Observable{Int}
@@ -45,20 +45,20 @@ mutable struct AppState
     slice_max::Observable{Int}
 
     # Diagnostic Overlays State
-    show_flow_dirs::Observable{Bool}
-    show_weld_lines::Observable{Bool}
-    show_air_traps::Observable{Bool}
-    show_wireframe::Observable{Bool}
+    show_flow_dirs::Observable{Bool} = Observable(false)
+    show_weld_lines::Observable{Bool} = Observable(false)
+    show_air_traps::Observable{Bool} = Observable(false)
+    show_wireframe::Observable{Bool} = Observable(false)
     flow_line_half_len::Observable{Float64}
 
     # Interactive Input State
-    hovered_gate::Observable{Int}
-    dragged_gate::Base.RefValue{Int}
-    resizing_gate::Base.RefValue{Bool}
-    resize_start_y::Base.RefValue{Float32}
-    resize_start_r::Base.RefValue{Float32}
-    gate_moved::Base.RefValue{Bool}
-    textbox_focused::Base.RefValue{Bool}
+    hovered_gate::Observable{Int} = Observable(0)
+    dragged_gate::Base.RefValue{Int} = Ref(0)
+    resizing_gate::Base.RefValue{Bool} = Ref(false)
+    resize_start_y::Base.RefValue{Float32} = Ref(0.0f0)
+    resize_start_r::Base.RefValue{Float32} = Ref(1.0f0)
+    gate_moved::Base.RefValue{Bool} = Ref(false)
+    textbox_focused::Base.RefValue{Bool} = Ref(false)
 end
 
 const CAD_EXTS  = Set([".step", ".stp", ".iges", ".igs", ".brep"])
@@ -508,14 +508,35 @@ function init_app_state()::AppState
     end
 
     state = AppState(
-        fig, lscene, overlay_scene, nothing, nothing,
-        current_filepath, is_cad_file, cad_elem_size, cad_min_curv, cad_circle_pts, meshdata,
-        res, voxel_confirmed, voxeldata, gates, solver_gates, last_stats, stats,
-        vertex_itp_f32, fill_time, t_max, color_limits,
-        n_stops, fill_step, cmap_name, base_cmap, mesh_cmap, Observable(false),
-        slice_axis, slice_idx, slice_max,
-        Observable(false), Observable(false), Observable(false), Observable(false), Observable(compute_flow_line_len(meshdata[])),
-        Observable(0), Ref(0), Ref(false), Ref(0.0f0), Ref(1.0f0), Ref(false), Ref(false),
+        fig                = fig,
+        lscene             = lscene,
+        overlay_scene      = overlay_scene,
+        current_filepath   = current_filepath,
+        is_cad_file        = is_cad_file,
+        cad_elem_size      = cad_elem_size,
+        cad_min_curv       = cad_min_curv,
+        cad_circle_pts     = cad_circle_pts,
+        meshdata           = meshdata,
+        res                = res,
+        voxel_confirmed    = voxel_confirmed,
+        voxeldata          = voxeldata,
+        gates              = gates,
+        solver_gates       = solver_gates,
+        last_stats         = last_stats,
+        stats              = stats,
+        vertex_itp_f32     = vertex_itp_f32,
+        fill_time          = fill_time,
+        t_max              = t_max,
+        color_limits       = color_limits,
+        n_stops            = n_stops,
+        fill_step          = fill_step,
+        cmap_name          = cmap_name,
+        base_cmap          = base_cmap,
+        mesh_cmap          = mesh_cmap,
+        slice_axis         = slice_axis,
+        slice_idx          = slice_idx,
+        slice_max          = slice_max,
+        flow_line_half_len = Observable(compute_flow_line_len(meshdata[])),
     )
 
     on(state.meshdata) do md
