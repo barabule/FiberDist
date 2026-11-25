@@ -4,61 +4,61 @@
 
 Base.@kwdef mutable struct AppState
     # Scenes & Main Plots
-    fig::Figure
-    lscene::LScene
-    overlay_scene::Scene
-    mesh_plot::Any = nothing
-    gate_plot::Any = nothing
+    fig::Figure                                             # Main application window
+    lscene::LScene                                          # 3D viewport scene
+    overlay_scene::Scene                                    # 2D HUD scene
+    mesh_plot::Any = nothing                                # Surface mesh plot
+    gate_plot::Any = nothing                                # Valve gate plot
 
     # Geometry & CAD Import State
-    current_filepath::Observable{String}
-    is_cad_file::Observable{Bool}
-    cad_elem_size::Observable{Float64}
-    cad_min_curv::Observable{Float64}
-    cad_circle_pts::Observable{Int}
-    meshdata::Observable{MeshData}
+    current_filepath::Observable{String}                    # Loaded file path
+    is_cad_file::Observable{Bool}                           # CAD format flag
+    cad_elem_size::Observable{Float64}                      # Target element size
+    cad_min_curv::Observable{Float64}                       # Min curvature size
+    cad_circle_pts::Observable{Int}                         # Circle point count
+    meshdata::Observable{MeshData}                          # Active surface mesh
 
     # Voxelization & Solver State
-    res::Observable{Int}
-    voxel_confirmed::Observable{Bool}
-    voxeldata::Observable{VoxelData}
-    gates::Observable{Vector{ValveGate}}
-    solver_gates::Observable{Vector{ValveGate}}
-    last_stats::Base.RefValue{Any}
-    stats::Observable{Any}
-    vertex_itp_f32::Observable{Any}
-    fill_time::Observable{Vector{Float32}}
-    t_max::Observable{Float32}
-    color_limits::Observable{Tuple{Float32, Float32}}
+    res::Observable{Int}                                    # Max axis voxels
+    voxel_confirmed::Observable{Bool}                       # Solver confirmation flag
+    voxeldata::Observable{VoxelData}                        # Voxelized part grid
+    gates::Observable{Vector{ValveGate}}                    # Interactive valve gates
+    solver_gates::Observable{Vector{ValveGate}}             # Solver-ready gates
+    last_stats::Base.RefValue{Any}                          # Cached projection stats
+    stats::Observable{Any}                                  # Triangle projection stats
+    vertex_itp_f32::Observable{Any}                         # Face-to-vertex interpolator
+    fill_time::Observable{Vector{Float32}}                  # Vertex fill time
+    t_max::Observable{Float32}                              # Maximum fill time
+    color_limits::Observable{Tuple{Float32, Float32}}       # Colormap time range
 
     # Visualization & Animation State
-    n_stops::Int
-    fill_step::Observable{Int}
-    cmap_name::Observable{Symbol}
-    base_cmap::Observable{Any}
-    mesh_cmap::Observable{Any}
-    is_playing::Observable{Bool} = Observable(false)
+    n_stops::Int                                            # Timeline animation stops
+    fill_step::Observable{Int}                              # Current animation step
+    cmap_name::Observable{Symbol}                           # Active colormap name
+    base_cmap::Observable{Any}                              # Full color gradient
+    mesh_cmap::Observable{Any}                              # Masked fill colormap
+    is_playing::Observable{Bool} = Observable(false)        # Animation playback flag
 
     # Slice Preview State
-    slice_axis::Observable{Int}
-    slice_idx::Observable{Int}
-    slice_max::Observable{Int}
+    slice_axis::Observable{Int}                             # Preview slice axis
+    slice_idx::Observable{Int}                              # Active slice index
+    slice_max::Observable{Int}                              # Max slice index
 
     # Diagnostic Overlays State
-    show_flow_dirs::Observable{Bool} = Observable(false)
-    show_weld_lines::Observable{Bool} = Observable(false)
-    show_air_traps::Observable{Bool} = Observable(false)
-    show_wireframe::Observable{Bool} = Observable(false)
-    flow_line_half_len::Observable{Float64}
+    show_flow_dirs::Observable{Bool} = Observable(false)    # Flow direction toggle
+    show_weld_lines::Observable{Bool} = Observable(false)   # Weld lines toggle
+    show_air_traps::Observable{Bool} = Observable(false)    # Air traps toggle
+    show_wireframe::Observable{Bool} = Observable(false)    # Mesh wireframe toggle
+    flow_line_half_len::Observable{Float64}                 # Flow segment half-length
 
     # Interactive Input State
-    hovered_gate::Observable{Int} = Observable(0)
-    dragged_gate::Base.RefValue{Int} = Ref(0)
-    resizing_gate::Base.RefValue{Bool} = Ref(false)
-    resize_start_y::Base.RefValue{Float32} = Ref(0.0f0)
-    resize_start_r::Base.RefValue{Float32} = Ref(1.0f0)
-    gate_moved::Base.RefValue{Bool} = Ref(false)
-    textbox_focused::Base.RefValue{Bool} = Ref(false)
+    hovered_gate::Observable{Int} = Observable(0)           # Hovered gate index
+    dragged_gate::Base.RefValue{Int} = Ref(0)               # Dragged gate index
+    resizing_gate::Base.RefValue{Bool} = Ref(false)         # Gate resize active
+    resize_start_y::Base.RefValue{Float32} = Ref(0.0f0)     # Drag start Y
+    resize_start_r::Base.RefValue{Float32} = Ref(1.0f0)     # Initial gate radius
+    gate_moved::Base.RefValue{Bool} = Ref(false)            # Gate changed flag
+    textbox_focused::Base.RefValue{Bool} = Ref(false)       # Textbox focus flag
 end
 
 const CAD_EXTS  = Set([".step", ".stp", ".iges", ".igs", ".brep"])
