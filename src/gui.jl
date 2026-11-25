@@ -48,6 +48,7 @@ mutable struct AppState
     show_flow_dirs::Observable{Bool}
     show_weld_lines::Observable{Bool}
     show_air_traps::Observable{Bool}
+    show_wireframe::Observable{Bool}
     flow_line_half_len::Observable{Float64}
 
     # Interactive Input State
@@ -513,7 +514,7 @@ function init_app_state()::AppState
         vertex_itp_f32, fill_time, t_max, color_limits,
         n_stops, fill_step, cmap_name, base_cmap, mesh_cmap, Observable(false),
         slice_axis, slice_idx, slice_max,
-        Observable(false), Observable(false), Observable(false), Observable(compute_flow_line_len(meshdata[])),
+        Observable(false), Observable(false), Observable(false), Observable(false), Observable(compute_flow_line_len(meshdata[])),
         Observable(0), Ref(0), Ref(false), Ref(0.0f0), Ref(1.0f0), Ref(false), Ref(false),
     )
 
@@ -745,6 +746,17 @@ function setup_3d_scene!(state::AppState)
         colormap = state.mesh_cmap,
         transparency = @lift(!$(state.voxel_confirmed)),
         shading = true,
+    )
+
+    wireframe!(
+        lscene,
+        plain_mesh;
+        color = RGBAf(0.12, 0.12, 0.15, 0.55),
+        linewidth = 0.8,
+        transparency = true,
+        depth_shift = -1f-4,
+        inspectable = false,
+        visible = state.show_wireframe,
     )
 
     scatter!(
@@ -1479,6 +1491,7 @@ function build_overlays_panel!(state::AppState, cb_card_rect::Observable{Rect2f}
         ("Flow Direction", state.show_flow_dirs),
         ("Weld Lines",     state.show_weld_lines),
         ("Air Traps",      state.show_air_traps),
+        ("Wireframe",      state.show_wireframe),
     )
 
     for (idx, (label_txt, obs)) in enumerate(items)
