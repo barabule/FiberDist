@@ -348,7 +348,7 @@ function with_computed_gate_delays(
     power::Float32 = 2.2f0,
     alpha::Float32 = 0.035f0
     )::Vector{ValveGate}
-    
+
     isempty(gates) && return ValveGate[]
 
     nx, ny, nz = size(vd.grid)
@@ -418,7 +418,7 @@ function init_app_state()::AppState
     cad_min_curv   = Observable(1.0)
     cad_circle_pts = Observable(15)
 
-    meshdata = Observable(
+    meshdata = Observable{MeshData}(
         load_step_mesh_as_surface(
             default_step;
             target_element_size = cad_elem_size[],
@@ -429,8 +429,8 @@ function init_app_state()::AppState
 
     res = Observable(100)
     voxel_confirmed = Observable(true)
-    
-    voxeldata = lift(meshdata, res) do md, r
+
+    voxeldata = map!(Observable{VoxelData}(), meshdata, res) do md, r
         VoxelData(md; res = r)
     end
 
@@ -440,10 +440,10 @@ function init_app_state()::AppState
     solver_gates = Observable(with_computed_gate_delays(gates[], voxeldata[]))
 
     last_stats = Ref{Any}(
-        project_voxel_to_mesh_triangles(meshdata[], voxeldata[], solve_eikonal_fim_ka(voxeldata[], gates[]))
+        project_voxel_to_mesh_triangles(meshdata[], voxeldata[], solve_eikonal_fim_ka(voxeldata[], solver_gates[]))
     )
 
-    stats = lift(meshdata, voxeldata, solver_gates, voxel_confirmed) do md, vd, gts, confirmed
+    stats = map!(Observable{Any}(), meshdata, voxeldata, solver_gates, voxel_confirmed) do md, vd, gts, confirmed
         confirmed || return last_stats[]
         sol = solve_eikonal_fim_ka(vd, gts)
         res_stats = project_voxel_to_mesh_triangles(md, vd, sol)
@@ -451,7 +451,7 @@ function init_app_state()::AppState
         return res_stats
     end
 
-    vertex_itp_f32 = lift(md -> AngleWeightInterpolator(md, Float32), meshdata)
+    vertex_itp_f32 = map!(md -> AngleWeightInterpolator(md, Float32), Observable{Any}(), meshdata)
 
     fill_time = lift(vertex_itp_f32, stats, meshdata, voxel_confirmed) do itp, st, md, confirmed
         n_verts = length(md.mesh.position)
@@ -459,7 +459,19 @@ function init_app_state()::AppState
         if !confirmed || length(st.fill_time) != n_faces
             return zeros(Float32, n_verts)
         end
-        return itp(zeros(Float32, n_verts), st.fill_time)
+        ft = itp(zeros(Float32, n_verts), st.fill_time)
+        @inbounds for i in eachindex(ft)
+            isfinite(ft[i]) || (ft[i] = 0.0f0)
+        end
+        return ft
+    end
+
+    # Pre-resize `fill_time.val` BEFORE `mesh_plot` (priority = 0) reacts to `meshdata`
+    on(meshdata; priority = 100) do md
+        n_verts = length(md.mesh.position)
+        if length(fill_time[]) != n_verts
+            fill_time.val = zeros(Float32, n_verts)
+        end
     end
 
     t_max = lift(fill_time) do ft
@@ -474,9 +486,9 @@ function init_app_state()::AppState
     unfilled_grey = RGBAf(0.78, 0.78, 0.80, 1.0)
     preview_grey  = RGBAf(0.72, 0.74, 0.78, 0.28)
 
-    base_cmap = lift(cname -> cgrad(cname, n_stops, categorical = true), cmap_name)
+    base_cmap = map!(cname -> cgrad(cname, n_stops, categorical = true), Observable{Any}(), cmap_name)
 
-    mesh_cmap = lift(cmap_name, fill_step, voxel_confirmed) do cname, step, confirmed
+    mesh_cmap = map!(Observable{Any}(), cmap_name, fill_step, voxel_confirmed) do cname, step, confirmed
         if !confirmed
             return cgrad(fill(preview_grey, n_stops), n_stops, categorical = true)
         end
@@ -512,12 +524,12 @@ function init_app_state()::AppState
         state.dragged_gate[] = 0
         state.gates[] = new_gates
         state.solver_gates[] = with_computed_gate_delays(new_gates, state.voxeldata[])
-        center!(state.lscene.scene)
+        fit_camera_to_mesh!(state.lscene, md)
         state.flow_line_half_len[] = compute_flow_line_len(md)
     end
-    
-    on(state.voxeldata) do vd
-        updated = with_computed_gate_delays(state.gates[], vd)
+
+    on(state.res) do _
+        updated = with_computed_gate_delays(state.gates[], state.voxeldata[])
         state.gates[] = updated
         state.solver_gates[] = updated
     end
@@ -715,9 +727,19 @@ end
 function setup_3d_scene!(state::AppState)
     lscene = state.lscene
 
+    plain_mesh = lift(state.meshdata) do md
+        m = md.mesh
+        coords = Point3f[Point3f(p) for p in GeometryBasics.coordinates(m)]
+        faces  = [
+            GeometryBasics.TriangleFace(f[1], f[2], f[3])
+            for f in GeometryBasics.faces(m)
+        ]
+        return GeometryBasics.mesh(coords, faces)
+    end
+
     state.mesh_plot = mesh!(
         lscene,
-        @lift($(state.meshdata).mesh);
+        plain_mesh;
         color = state.fill_time,
         colorrange = state.color_limits,
         colormap = state.mesh_cmap,
