@@ -1114,10 +1114,16 @@ function build_geometry_panel!(state::AppState, left_panel_w::Int)
     )
     set_overdraw_recursive!(btn_load.blockscene)
 
+    geom_label = lift(state.current_filepath, state.meshdata) do fp, md
+        n_v = length(GeometryBasics.coordinates(md.mesh))
+        n_f = length(GeometryBasics.faces(md.mesh))
+        "$(basename(fp)) (V:$(n_v), F:$(n_f))"
+    end
+
     text!(
         sc,
         @lift(Point2f($geom_card_rect.origin[1] + 12, $geom_card_rect.origin[2] + $geom_card_rect.widths[2] - 67));
-        text = @lift(basename($(state.current_filepath))), fontsize = 11, color = :gray35,
+        text = geom_label, fontsize = 10, color = :gray35,
         align = (:left, :center), overdraw = true,
     )
 
@@ -1523,7 +1529,7 @@ function build_overlays_panel!(state::AppState, cb_card_rect::Observable{Rect2f}
 end
 
 function build_hud!(state::AppState)
-    left_panel_w = 230
+    left_panel_w = 260
     cb_card_w    = 114
 
     geom_rect = build_geometry_panel!(state, left_panel_w)
