@@ -338,3 +338,69 @@ end
         @test mat_buf == interp_f32(mat_rand)
     end
 end
+
+
+@testset "Mesh Loading" verbose = true begin
+    state = FD.init_app_state()
+    FD.setup_3d_scene!(state)
+
+    # Downstream observables in AppState must stay wired to the struct's Observables
+    @test !isempty(state.meshdata.listeners)
+    @test !isempty(state.voxeldata.listeners)
+    @test !isempty(state.stats.listeners)
+    @test !isempty(state.vertex_itp_f32.listeners)
+
+    init_vd_size = size(state.voxeldata[].grid)
+    init_n_faces = length(state.stats[].fill_time)
+    init_n_verts = length(state.fill_time[])
+    @test init_n_faces == length(state.meshdata[].mesh.faces)
+    @test init_n_verts == length(state.meshdata[].mesh.position)
+
+    # 1. Load a different geometry (cube.stl) with voxel_confirmed = false
+    cube_fn = joinpath(@__DIR__, "test_assets", "cube.stl")
+    cube_md = FD.MeshData(cube_fn)
+    state.is_cad_file[] = false
+    state.voxel_confirmed[] = false
+    state.meshdata[] = cube_md
+
+    cube_vd = state.voxeldata[]
+    @test size(cube_vd.grid) != init_vd_size
+    @test size(cube_vd.grid, 1) == size(cube_vd.grid, 2) == size(cube_vd.grid, 3)
+    @test length(state.fill_time[]) == length(cube_md.mesh.position)
+
+    # 2. Change voxelization resolution and verify it voxelizes the new mesh (not the old one)
+    new_res = 50
+    state.res[] = new_res
+    cube_vd_50 = state.voxeldata[]
+    @test size(cube_vd_50.grid) != size(cube_vd.grid)
+    @test size(cube_vd_50.grid, 1) == size(cube_vd_50.grid, 2) == size(cube_vd_50.grid, 3)
+    @test (new_res + 2) <= size(cube_vd_50.grid, 1) <= (new_res + 4)
+
+    # 3. Confirm voxelization -> trigger solve & surface projection on the new mesh
+    state.voxel_confirmed[] = true
+    @test length(state.stats[].fill_time) == length(cube_md.mesh.faces)
+    @test length(state.fill_time[]) == length(cube_md.mesh.position)
+    @test all(isfinite, state.stats[].fill_time)
+    @test all(isfinite, state.fill_time[])
+
+    # 4. Remesh / load a STEP geometry again and verify sync from STL -> STEP
+    step_md = FD.load_step_mesh_as_surface(
+        state.current_filepath[];
+        target_element_size = 3.0,
+        min_curvature_size = 2.0,
+        min_circle_points = 10,
+    )
+    state.is_cad_file[] = true
+    state.voxel_confirmed[] = false
+    state.meshdata[] = step_md
+
+    step_vd = state.voxeldata[]
+    @test size(step_vd.grid) != size(cube_vd_50.grid)
+    @test !(size(step_vd.grid, 1) == size(step_vd.grid, 2) == size(step_vd.grid, 3))
+    @test length(state.fill_time[]) == length(step_md.mesh.position)
+
+    state.voxel_confirmed[] = true
+    @test length(state.stats[].fill_time) == length(step_md.mesh.faces)
+    @test length(state.fill_time[]) == length(step_md.mesh.position)
+    @test all(isfinite, state.stats[].fill_time)
+end
