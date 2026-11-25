@@ -7,6 +7,7 @@ Base.@kwdef mutable struct AppState
     fig::Figure                                             # Main application window
     lscene::LScene                                          # 3D viewport scene
     overlay_scene::Scene                                    # 2D HUD scene
+    triad_scene::Scene                                      # Orientation triad scene
     mesh_plot::Any = nothing                                # Surface mesh plot
     gate_plot::Any = nothing                                # Valve gate plot
 
@@ -410,6 +411,11 @@ function init_app_state()::AppState
         )
     )
     overlay_scene = Scene(fig.scene; clear = false, camera = campixel!)
+    triad_vp = lift(lscene.scene.viewport) do vp
+        s = clamp(round(Int, 0.13 * vp.widths[2]), 70, 220)
+        Rect2i(round(Int, vp.origin[1]) + 14, round(Int, vp.origin[2]) + 14, s, s)
+    end
+    triad_scene = Scene(fig.scene; clear = false, viewport = triad_vp)
 
     default_step = joinpath(pkgdir(@__MODULE__), "assets", "plate_with_ribs_2.step")
     current_filepath = Observable(default_step)
@@ -511,6 +517,7 @@ function init_app_state()::AppState
         fig                = fig,
         lscene             = lscene,
         overlay_scene      = overlay_scene,
+        triad_scene        = triad_scene,
         current_filepath   = current_filepath,
         is_cad_file        = is_cad_file,
         cad_elem_size      = cad_elem_size,
@@ -801,6 +808,92 @@ function setup_3d_scene!(state::AppState)
     )
 
     setup_diagnostic_overlays_3d!(state)
+    setup_orientation_triad!(state)
+end
+
+"""
+    build_triad_mesh()
+
+Constructs a colored orientation triad mesh of 3 cylinders and 3 cones
+(X = red, Y = green, Z = blue) centered at the origin.
+"""
+function build_triad_mesh()
+    cyl_r = 0.055f0
+    cyl_len = 0.72f0
+    cone_r = 0.14f0
+    cone_len = 0.32f0
+
+    axes_spec = (
+        (Vec3f(1.0f0, 0.0f0, 0.0f0), RGBAf(0.88, 0.18, 0.18, 1.0)),
+        (Vec3f(0.0f0, 1.0f0, 0.0f0), RGBAf(0.18, 0.72, 0.22, 1.0)),
+        (Vec3f(0.0f0, 0.0f0, 1.0f0), RGBAf(0.18, 0.42, 0.90, 1.0)),
+    )
+
+    all_pts   = Point3f[]
+    all_faces = GeometryBasics.TriangleFace{Int}[]
+    all_cols  = RGBAf[]
+
+    for (dir, col) in axes_spec
+        p0 = Point3f(-cyl_r * dir)
+        p1 = Point3f(cyl_len * dir)
+        p2 = Point3f((cyl_len + cone_len) * dir)
+
+        for prim in (
+            GeometryBasics.Cylinder(p0, p1, cyl_r),
+            GeometryBasics.Cone(p1, p2, cone_r),
+        )
+            m = GeometryBasics.triangle_mesh(GeometryBasics.Tesselation(prim, 24))
+            v_offset = length(all_pts)
+            m_pts = GeometryBasics.coordinates(m)
+            append!(all_pts, m_pts)
+            append!(all_cols, fill(col, length(m_pts)))
+            for f in GeometryBasics.faces(m)
+                push!(all_faces, GeometryBasics.TriangleFace{Int}(
+                    f[1] + v_offset, f[2] + v_offset, f[3] + v_offset
+                ))
+            end
+        end
+    end
+
+    return GeometryBasics.normal_mesh(
+        GeometryBasics.mesh(all_pts, all_faces; color = all_cols)
+    )
+end
+
+function setup_orientation_triad!(state::AppState)
+    mesh!(
+        state.triad_scene,
+        build_triad_mesh();
+        shading = true,
+        depth_shift = -0.97f0,
+        inspectable = false,
+    )
+
+    cam = cameracontrols(state.lscene.scene)
+    triad_cam = state.triad_scene.camera
+    proj = Makie.orthographicprojection(Float32, -1.35f0, 1.35f0, -1.35f0, 1.35f0, 0.0f0, 100.0f0)
+
+    function sync_triad_camera!()
+        view_vec = Vec3f(cam.eyeposition[] - cam.lookat[])
+        v_len = norm(view_vec)
+        dir = v_len > 1f-6 ? (view_vec / v_len) : Vec3f(0.0f0, 0.0f0, 1.0f0)
+        up_raw = Vec3f(cam.upvector[])
+        u_len = norm(up_raw)
+        up = u_len > 1f-6 ? (up_raw / u_len) : Vec3f(0.0f0, 1.0f0, 0.0f0)
+
+        eye = 50.0f0 * dir
+        view_mat = Makie.lookat(eye, Vec3f(0.0f0, 0.0f0, 0.0f0), up)
+        triad_cam.view[] = view_mat
+        triad_cam.projection[] = proj
+        triad_cam.projectionview[] = proj * view_mat
+        triad_cam.eyeposition[] = eye
+        triad_cam.upvector[] = up
+        triad_cam.view_direction[] = -dir
+    end
+
+    onany(cam.eyeposition, cam.lookat, cam.upvector; update = true) do _, _, _
+        sync_triad_camera!()
+    end
 end
 
 function setup_diagnostic_overlays_3d!(state::AppState)
