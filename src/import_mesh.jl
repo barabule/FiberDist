@@ -265,7 +265,7 @@ function is_valid(
     sizehint!(half_edges, 3 * length(tris))
 
     @inbounds for f in tris
-        v1, v2, v3 = Int(f[1]), Int(f[2]), Int(f[3])
+        v1, v2, v3 = convert(Int, f[1]), convert(Int, f[2]), convert(Int, f[3])
         (v1 == v2 || v2 == v3 || v3 == v1) && return false
 
         for (u, v) in ((v1, v2), (v2, v3), (v3, v1))
@@ -279,6 +279,12 @@ function is_valid(
     end
 
     return signed_volume_6(pts, tris) > 0.0
+end
+
+function is_valid(mesh::GeometryBasics.AbstractMesh)
+    pts  = GeometryBasics.coordinates(mesh)
+    tris = GeometryBasics.decompose(TriangleFace{Int}, mesh)
+    return is_valid(pts, tris)
 end
 
 

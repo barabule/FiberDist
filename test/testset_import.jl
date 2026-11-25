@@ -5,23 +5,29 @@
     # fn = joinpath(pkgdir(@__MODULE__), "assets", "plate_with_ribs_2.step")
     fn = "../assets/plate_with_ribs.step"
     meshdata = FD.load_step_mesh_as_surface(fn)
-    @test FD.is_valid(meshdata.mesh)
+    @test FD.is_valid(meshdata.mesh.position, meshdata.mesh.faces)
     @test FD.is_valid(meshdata.mesh)
 end
 
 @testset "STL import" verbose = true begin
     fn = "test_assets/cube.stl"
     meshdata = FD.MeshData(fn)
+    @test FD.is_valid(meshdata.mesh.position, meshdata.mesh.faces)
     @test FD.is_valid(meshdata.mesh)
     @test hasproperty(meshdata, :tlas)
     @test hasproperty(meshdata, :adj)
-    @test FD.is_valid(meshdata.mesh)
 end
 
 @testset "MeshData" verbose = true begin
     mesh = FD.normal_mesh(FD.Tesselation(FD.Sphere(FD.Point3f(0), 1.0f0), 3))
     meshdata = FD.MeshData(mesh)
-    @test true
+    @test meshdata isa FD.MeshData
+    @test !FD.is_valid(mesh)
+
+    tet_pts = FD.Point3f[(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    tet_faces = FD.TriangleFace{Int}[(1, 3, 2), (1, 2, 4), (1, 4, 3), (2, 3, 4)]
+    tet_mesh = FD.normal_mesh(tet_pts, tet_faces)
+    @test FD.is_valid(tet_mesh)
 end
 
 
