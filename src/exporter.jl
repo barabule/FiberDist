@@ -1,146 +1,203 @@
 
-"""
-    export_fot_vtk(filepath, voxel_grid, voxel_spacing, corner, T_field, analysis)
 
-Exports the 3D Eikonal arrival field, diagnostic masks, flow vectors, and 6-component
-symmetric Fiber Orientation Tensor (`TENSORS FOT float`) to a Legacy VTK `.vtk` file.
 """
-function export_fot_vtk(
+    export_fea_csv(filepath::AbstractString, md::MeshData, st;
+                   vertex_fill_time::Union{Nothing, AbstractVector{<:Real}} = nothing,
+                   include_fiber_tensor::Bool = true)
+
+Exports per-triangle centroid coordinates, normals, fill time, flow direction,
+diagnostic masks (weld lines, air traps), and an optional 2nd-order Advani-Tucker
+orientation tensor estimate (`a11..a23`) for FEA mapping (Ansys External Data,
+Digimat-MAP, Converse, Abaqus/LS-DYNA scripts).
+"""
+function export_fea_csv(
     filepath::AbstractString,
-    voxel_grid::AbstractArray{Bool, 3},
-    voxel_spacing,
-    corner,
-    T_field::AbstractArray{<:Real, 3},
-    analysis
+    md::MeshData,
+    st;
+    vertex_fill_time::Union{Nothing, AbstractVector{<:Real}} = nothing,
+    include_fiber_tensor::Bool = true
 )
-    nx, ny, nz = size(voxel_grid)
-    n_pts = nx * ny * nz
-    dx, dy, dz = Float64(voxel_spacing[1]), Float64(voxel_spacing[2]), Float64(voxel_spacing[3])
-    # VTK structured point coordinates sit at voxel centers
-    ox = Float64(corner[1]) + 0.5 * dx
-    oy = Float64(corner[2]) + 0.5 * dy
-    oz = Float64(corner[3]) + 0.5 * dz
-
-    fot   = analysis.fot
-    masks = analysis.masks
-    dirs  = analysis.flow_dirs
+    centroids = st.centroids
+    normals   = st.normals
+    fill_time = st.fill_time
+    flow_dir  = st.flow_dir
+    weld_mask = st.masks.weld_lines
+    air_mask  = st.masks.air_traps
 
     open(filepath, "w") do io
-        println(io, "# vtk DataFile Version 3.0")
-        println(io, "FiberDist Eikonal FOT and Defect Analysis")
-        println(io, "ASCII")
-        println(io, "DATASET STRUCTURED_POINTS")
-        @printf(io, "DIMENSIONS %d %d %d\n", nx, ny, nz)
-        @printf(io, "ORIGIN %.6f %.6f %.6f\n", ox, oy, oz)
-        @printf(io, "SPACING %.6f %.6f %.6f\n", dx, dy, dz)
-        @printf(io, "POINT_DATA %d\n", n_pts)
-
-        # 1. Solid Mask
-        println(io, "SCALARS SolidMask int 1")
-        println(io, "LOOKUP_TABLE default")
-        for k in 1:nz, j in 1:ny, i in 1:nx
-            println(io, voxel_grid[i, j, k] ? 1 : 0)
+        if include_fiber_tensor
+            println(io, "elem_id,x,y,z,nx,ny,nz,fill_time,flow_x,flow_y,flow_z,weld_line,air_trap,a11,a22,a33,a12,a13,a23")
+        else
+            println(io, "elem_id,x,y,z,nx,ny,nz,fill_time,flow_x,flow_y,flow_z,weld_line,air_trap")
         end
 
-        # 2. Arrival Time
-        println(io, "SCALARS ArrivalTime float 1")
-        println(io, "LOOKUP_TABLE default")
-        for k in 1:nz, j in 1:ny, i in 1:nx
-            val = (voxel_grid[i, j, k] && isfinite(T_field[i, j, k])) ? Float32(T_field[i, j, k]) : -1.0f0
-            @printf(io, "%.6g\n", val)
-        end
+        @inbounds for i in eachindex(centroids)
+            c  = centroids[i]
+            n  = normals[i]
+            u  = flow_dir[i]
+            ft = Float32(fill_time[i])
+            wl = weld_mask[i] ? 1 : 0
+            at = air_mask[i]  ? 1 : 0
 
-        # 3. Diagnostic BitArray Masks
-        for (name, mask) in (
-            ("WeldLine",   masks.weld_lines),
-            ("MeldLine",   masks.meld_lines),
-            ("AirTrap",    masks.air_traps),
-            ("Hesitation", masks.hesitation)
-        )
-            println(io, "SCALARS $name int 1")
-            println(io, "LOOKUP_TABLE default")
-            for k in 1:nz, j in 1:ny, i in 1:nx
-                println(io, mask[i, j, k] ? 1 : 0)
+            # Normalize flow vector for clean orientation export
+            unorm = sqrt(u[1]^2 + u[2]^2 + u[3]^2)
+            ux, uy, uz = unorm > 1f-6 ? (u[1]/unorm, u[2]/unorm, u[3]/unorm) : (0.0f0, 0.0f0, 0.0f0)
+
+            if include_fiber_tensor
+                # Mildly aligned skin-core effective tensor (0.75 along flow + 0.25 isotropic planar)
+                # At weld lines, collapse alignment toward transverse/planar isotropic
+                w_align = wl == 1 ? 0.15f0 : 0.70f0
+                w_iso   = (1.0f0 - w_align) / 3.0f0
+                a11 = w_align * ux * ux + w_iso
+                a22 = w_align * uy * uy + w_iso
+                a33 = w_align * uz * uz + w_iso
+                a12 = w_align * ux * uy
+                a13 = w_align * ux * uz
+                a23 = w_align * uy * uz
+
+                @printf(io, "%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+                    i, c[1], c[2], c[3], n[1], n[2], n[3], ft, ux, uy, uz, wl, at,
+                    a11, a22, a33, a12, a13, a23)
+            else
+                @printf(io, "%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d\n",
+                    i, c[1], c[2], c[3], n[1], n[2], n[3], ft, ux, uy, uz, wl, at)
             end
-        end
-
-        # 4. Flow Direction Vectors
-        println(io, "VECTORS FlowDirection float")
-        for k in 1:nz, j in 1:ny, i in 1:nx
-            u = dirs[i, j, k]
-            @printf(io, "%.5f %.5f %.5f\n", Float32(u[1]), Float32(u[2]), Float32(u[3]))
-        end
-
-        # 5. Full Symmetric 3x3 Fiber Orientation Tensor
-        println(io, "TENSORS FOT float")
-        for k in 1:nz, j in 1:ny, i in 1:nx
-            v11 = Float32(fot.a11[i, j, k])
-            v22 = Float32(fot.a22[i, j, k])
-            v33 = Float32(fot.a33[i, j, k])
-            v12 = Float32(fot.a12[i, j, k])
-            v13 = Float32(fot.a13[i, j, k])
-            v23 = Float32(fot.a23[i, j, k])
-            @printf(io, "%.5f %.5f %.5f\n%.5f %.5f %.5f\n%.5f %.5f %.5f\n\n",
-                v11, v12, v13,
-                v12, v22, v23,
-                v13, v23, v33
-            )
         end
     end
     return filepath
 end
 
-
 """
-    export_fot_moldflow_xml(filepath, voxel_grid, voxel_spacing, corner, analysis)
+    export_vtk_legacy(filepath::AbstractString, md::MeshData, st,
+                      vertex_fill_time::AbstractVector{<:Real})
 
-Exports interior solid voxel centroids and their 6 symmetric FOT components
-`(a11, a22, a33, a12, a13, a23)` in standard Moldflow / Digimat XML format.
+Writes a self-contained VTK Legacy ASCII (`POLYDATA` / `UNSTRUCTURED_GRID`) file
+containing surface triangle connectivity, nodal `fill_time`, and elemental
+`fill_time`, `flow_direction`, `weld_lines`, and `air_traps`.
 """
-function export_fot_moldflow_xml(
+function export_vtk_legacy(
     filepath::AbstractString,
-    voxel_grid::AbstractArray{Bool, 3},
-    voxel_spacing,
-    corner,
-    analysis
+    md::MeshData,
+    st,
+    vertex_fill_time::AbstractVector{<:Real}
 )
-    nx, ny, nz = size(voxel_grid)
-    dx, dy, dz = Float64(voxel_spacing[1]), Float64(voxel_spacing[2]), Float64(voxel_spacing[3])
-    ox, oy, oz = Float64(corner[1]), Float64(corner[2]), Float64(corner[3])
-    fot = analysis.fot
-
-    n_solid = count(voxel_grid)
+    pts   = GeometryBasics.coordinates(md.mesh)
+    faces = GeometryBasics.faces(md.mesh)
+    n_pts   = length(pts)
+    n_faces = length(faces)
 
     open(filepath, "w") do io
-        println(io, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
-        println(io, "<MoldflowSimulationData version=\"1.0\">")
-        println(io, "  <Header>")
-        println(io, "    <Generator>FiberDist.jl</Generator>")
-        println(io, "    <DataType>FiberOrientationTensor</DataType>")
-        println(io, "    <CoordinateSystem>GlobalCartesian</CoordinateSystem>")
-        println(io, "    <TensorOrder>a11 a22 a33 a12 a13 a23</TensorOrder>")
-        @printf(io, "    <PointCount>%d</PointCount>\n", n_solid)
-        println(io, "  </Header>")
-        println(io, "  <OrientationDataset>")
+        println(io, "# vtk DataFile Version 3.0")
+        println(io, "Injection Molding Fill & Flow Analysis")
+        println(io, "ASCII")
+        println(io, "DATASET UNSTRUCTURED_GRID")
 
-        idx = 0
-        @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
-            voxel_grid[i, j, k] || continue
-            idx += 1
-            px = ox + (i - 0.5) * dx
-            py = oy + (j - 0.5) * dy
-            pz = oz + (k - 0.5) * dz
-
-            @printf(io,
-                "    <Point id=\"%d\" x=\"%.5f\" y=\"%.5f\" z=\"%.5f\" a11=\"%.5f\" a22=\"%.5f\" a33=\"%.5f\" a12=\"%.5f\" a13=\"%.5f\" a23=\"%.5f\"/>\n",
-                idx, px, py, pz,
-                fot.a11[i, j, k], fot.a22[i, j, k], fot.a33[i, j, k],
-                fot.a12[i, j, k], fot.a13[i, j, k], fot.a23[i, j, k]
-            )
+        println(io, "POINTS $n_pts float")
+        @inbounds for p in pts
+            @printf(io, "%.6f %.6f %.6f\n", p[1], p[2], p[3])
         end
 
-        println(io, "  </OrientationDataset>")
-        println(io, "</MoldflowSimulationData>")
+        println(io, "CELLS $n_faces $(4 * n_faces)")
+        @inbounds for f in faces
+            # VTK uses 0-based vertex indexing
+            println(io, "3 $(Int(f[1]) - 1) $(Int(f[2]) - 1) $(Int(f[3]) - 1)")
+        end
+
+        println(io, "CELL_TYPES $n_faces")
+        for _ in 1:n_faces
+            println(io, "5") # VTK_TRIANGLE
+        end
+
+        # Elemental (Cell) Fields
+        println(io, "CELL_DATA $n_faces")
+        println(io, "SCALARS fill_time_elem float 1")
+        println(io, "LOOKUP_TABLE default")
+        @inbounds for v in st.fill_time
+            @printf(io, "%.6f\n", Float32(v))
+        end
+
+        println(io, "SCALARS weld_line int 1")
+        println(io, "LOOKUP_TABLE default")
+        @inbounds for w in st.masks.weld_lines
+            println(io, w ? 1 : 0)
+        end
+
+        println(io, "SCALARS air_trap int 1")
+        println(io, "LOOKUP_TABLE default")
+        @inbounds for a in st.masks.air_traps
+            println(io, a ? 1 : 0)
+        end
+
+        println(io, "VECTORS flow_direction float")
+        @inbounds for u in st.flow_dir
+            @printf(io, "%.6f %.6f %.6f\n", u[1], u[2], u[3])
+        end
+
+        # Nodal (Point) Fields
+        if length(vertex_fill_time) == n_pts
+            println(io, "POINT_DATA $n_pts")
+            println(io, "SCALARS fill_time_node float 1")
+            println(io, "LOOKUP_TABLE default")
+            @inbounds for v in vertex_fill_time
+                @printf(io, "%.6f\n", Float32(v))
+            end
+        end
     end
     return filepath
+end
+
+"""
+    export_moldflow_ele(basepath::AbstractString, md::MeshData, st)
+
+Writes Moldflow-compatible ASCII `.pat` (Patran Neutral mesh) and `.ele`
+(elemental orientation tensor & weld line quality) files for Digimat-MAP / Converse.
+"""
+function export_moldflow_ele(basepath::AbstractString, md::MeshData, st)
+    pts   = GeometryBasics.coordinates(md.mesh)
+    faces = GeometryBasics.faces(md.mesh)
+
+    pat_path = basepath * ".pat"
+    ele_path = basepath * ".ele"
+
+    open(pat_path, "w") do io
+        @printf(io, "25       0       0       1       0       0       0       0       0\n")
+        @printf(io, "Mold Simulation Surface Mesh Export\n")
+        @printf(io, "26       0       0       1%8d%8d       0       0       0\n", length(pts), length(faces))
+        @printf(io, "01-JAN-26   00:00:00      0.000000\n")
+        @inbounds for (i, p) in enumerate(pts)
+            @printf(io, " 1%8d       0       2       0       0       0       0       0\n", i)
+            @printf(io, "%16.9E%16.9E%16.9E\n", p[1], p[2], p[3])
+            @printf(io, "1G       6       0       0  000000\n")
+        end
+        @inbounds for (i, f) in enumerate(faces)
+            @printf(io, " 2%8d       3       2       0       0       0       0       0\n", i)
+            @printf(io, "       3       0       0       0 0.000000000E+00 0.000000000E+00 0.000000000E+00\n")
+            @printf(io, "%8d%8d%8d\n", Int(f[1]), Int(f[2]), Int(f[3]))
+        end
+        @printf(io, "99       0       0       1       0       0       0       0       0\n")
+    end
+
+    open(ele_path, "w") do io
+        println(io, "Fiber orientation tensor on elements")
+        println(io, "1")
+        println(io, "0.0")
+        println(io, length(faces))
+        @inbounds for i in eachindex(faces)
+            u = st.flow_dir[i]
+            unorm = sqrt(u[1]^2 + u[2]^2 + u[3]^2)
+            ux, uy, uz = unorm > 1f-6 ? (u[1]/unorm, u[2]/unorm, u[3]/unorm) : (1.0f0, 0.0f0, 0.0f0)
+            w_align = st.masks.weld_lines[i] ? 0.15f0 : 0.70f0
+            w_iso   = (1.0f0 - w_align) / 3.0f0
+            a11 = w_align * ux * ux + w_iso
+            a22 = w_align * uy * uy + w_iso
+            a33 = w_align * uz * uz + w_iso
+            a12 = w_align * ux * uy
+            a23 = w_align * uy * uz
+            a13 = w_align * ux * uz
+            @printf(io, "%8d %12.6f %12.6f %12.6f %12.6f %12.6f %12.6f\n",
+                i, a11, a22, a33, a12, a23, a13)
+        end
+    end
+
+    return (pat = pat_path, ele = ele_path)
 end

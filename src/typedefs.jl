@@ -250,3 +250,76 @@ values using tip-angle weights.
 struct AngleWeightInterpolator{T<:AbstractFloat}
     W::SparseMatrixCSC{T, Int}
 end
+
+
+"""
+ FiberMaterialParams
+
+Struct holding filling material params
+
+"""
+Base.@kwdef struct FiberMaterialParams{T<:AbstractFloat}
+    s_flow::T         = T(0.84)   # Peak shear-zone flow alignment
+    s_trans::T        = T(0.12)   # Peak shear-zone transverse component
+    c_flow_plug::T    = T(0.72)   # Core flow alignment at zero divergence
+    c_flow_div::T     = T(0.18)   # Core flow alignment at strong divergence
+    c_norm::T         = T(0.08)   # Core out-of-plane component
+    core_exponent::T  = T(2.0)    # Core width exponent (higher = wider core)
+    skin_drop::T      = T(0.06)   # Fountain-flow alignment drop at mold wall (ζ -> 1)
+    div_scale::T      = T(5.0)    # Sensitivity to flow divergence
+    max_shear_tilt::T = T(0.08)   # Peak out-of-plane shear tilt λ13
+    weld_flow::T      = T(0.15)   # Weld-line flow-parallel component
+end
+
+"""
+    fiber_material_preset(::Type{T} = Float32;
+                           polymer::Symbol = :pa66,
+                           fiber::Symbol = :gf,
+                           wt_frac::Real = 0.30) -> FiberMaterialParams{T}
+
+Builds physically calibrated `FiberMaterialParams` from polymer morphology
+(`:pa66`, `:pa6`, `:pbt`, `:pp`, `:pps`, `:pc`, `:abs`, `:peek`),
+fiber type (`:gf` or `:cf`), and fiber weight fraction `wt_frac ∈ [0.0, 0.65]`.
+"""
+function fiber_material_preset(
+    ::Type{T} = Float32;
+    polymer::Symbol = :pa66,
+    fiber::Symbol   = :gf,
+    wt_frac::Real   = 0.30
+) where {T<:AbstractFloat}
+    wf = clamp(T(wt_frac), zero(T), T(0.65))
+    is_cf = (fiber === :cf)
+    is_amorphous = polymer in (:pc, :abs, :pmma, :pei, :psu)
+
+    # Effective crowding factor (CF has higher aspect ratio & interaction at same wt%)
+    crowd = clamp(wf * (is_cf ? T(2.1) : T(1.5)), zero(T), one(T))
+
+    s_flow      = T(0.90) - T(0.20) * crowd
+    s_norm      = T(0.03) + T(0.05) * crowd
+    s_trans     = one(T) - s_flow - s_norm
+
+    c_flow_plug = T(0.76) - T(0.26) * crowd
+    c_flow_div  = T(0.16) + T(0.10) * crowd
+    c_norm      = T(0.05) + T(0.08) * crowd
+
+    # Semi-crystalline matrices freeze faster -> thicker shear layer (lower core_exponent)
+    base_exp      = is_amorphous ? T(2.5) : T(1.7)
+    core_exponent = base_exp + T(0.4) * crowd
+    skin_drop     = is_amorphous ? T(0.04) : T(0.10)
+
+    max_shear_tilt = T(0.10) * (one(T) - T(0.55) * crowd)
+    weld_flow      = is_cf ? T(0.20) : (T(0.12) + T(0.08) * wf)
+
+    return FiberMaterialParams{T}(;
+        s_flow, 
+        s_trans, 
+        c_flow_plug, 
+        c_flow_div, 
+        c_norm,
+        core_exponent, 
+        skin_drop,
+        div_scale = T(5.0),
+        max_shear_tilt,
+        weld_flow,
+    )
+end

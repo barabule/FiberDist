@@ -382,3 +382,109 @@ function compute_triangle_layered_fot(
     return (; zeta, layers, shell_avg)
 end
 
+
+function compute_triangle_layered_fot(
+    tri_fields;
+    n_layers::Int = 10,
+    mat::FiberMaterialParams = FiberMaterialParams{eltype(tri_fields.divergence)}(),
+    thicknesses::Union{Nothing, AbstractVector} = nothing
+)
+    flow_dirs = tri_fields.flow_dir
+    normals   = tri_fields.normals
+    divs      = tri_fields.divergence
+    welds     = tri_fields.masks.weld_lines
+
+    T = eltype(divs)
+    m = FiberMaterialParams{T}(
+        T(mat.s_flow), T(mat.s_trans), T(mat.c_flow_plug), T(mat.c_flow_div),
+        T(mat.c_norm), T(mat.core_exponent), T(mat.skin_drop), T(mat.div_scale),
+        T(mat.max_shear_tilt), T(mat.weld_flow)
+    )
+
+    n_tris = length(flow_dirs)
+    @assert n_layers >= 1 "n_layers must be >= 1"
+
+    zeta = [T(l - 0.5) / T(n_layers) for l in 1:n_layers]
+
+    a11 = zeros(T, n_tris, n_layers)
+    a22 = zeros(T, n_tris, n_layers)
+    a12 = zeros(T, n_tris, n_layers)
+    a13 = zeros(T, n_tris, n_layers)
+    a23 = zeros(T, n_tris, n_layers)
+
+    s_norm = max(zero(T), one(T) - m.s_flow - m.s_trans)
+    h_ref  = thicknesses === nothing ? one(T) : T(sum(thicknesses) / max(n_tris, 1))
+
+    Threads.@threads for idx in 1:n_tris
+        @inbounds begin
+            e1 = flow_dirs[idx]
+            e3 = normals[idx]
+
+            if norm(e1) < T(1e-6)
+                for l in 1:n_layers
+                    a11[idx, l] = T(1) / T(3)
+                    a22[idx, l] = T(1) / T(3)
+                end
+                continue
+            end
+
+            e2      = normalize(cross(e3, e1))
+            is_weld = welds[idx]
+            div_u   = divs[idx]
+
+            # Thicker sections cool slower -> wider core (higher effective exponent)
+            h_ratio = thicknesses === nothing ? one(T) : clamp(T(thicknesses[idx]) / max(h_ref, T(1e-4)), T(0.5), T(2.0))
+            p_eff   = m.core_exponent * sqrt(h_ratio)
+
+            α_div   = T(0.5) * (one(T) + tanh(div_u * m.div_scale))
+            c_flow  = (one(T) - α_div) * m.c_flow_plug + α_div * m.c_flow_div
+            c_norm  = m.c_norm
+            c_trans = max(zero(T), one(T) - c_flow - c_norm)
+
+            for l in 1:n_layers
+                ζ = zeta[l]
+
+                if is_weld
+                    λ_flow  = m.weld_flow
+                    λ_norm  = c_norm
+                    λ_trans = max(zero(T), one(T) - λ_flow - λ_norm)
+                    λ_13    = zero(T)
+                else
+                    w_shear = ζ^p_eff
+                    # Fountain-flow frozen skin drop localized near ζ ∈ [0.85, 1.0]
+                    w_fountain = max(zero(T), (ζ - T(0.85)) / T(0.15))^2
+                    drop = m.skin_drop * w_fountain
+
+                    λ_flow  = (one(T) - w_shear) * c_flow  + w_shear * m.s_flow  - drop
+                    λ_trans = (one(T) - w_shear) * c_trans + w_shear * m.s_trans + T(0.75) * drop
+                    λ_norm  = (one(T) - w_shear) * c_norm  + w_shear * s_norm    + T(0.25) * drop
+                    λ_13    = m.max_shear_tilt * T(4) * ζ * (one(T) - ζ) * w_shear
+                end
+
+                a11[idx, l] = λ_flow * e1[1]^2 + λ_trans * e2[1]^2 + λ_norm * e3[1]^2 +
+                              T(2) * λ_13 * e1[1] * e3[1]
+                a22[idx, l] = λ_flow * e1[2]^2 + λ_trans * e2[2]^2 + λ_norm * e3[2]^2 +
+                              T(2) * λ_13 * e1[2] * e3[2]
+
+                a12[idx, l] = λ_flow * e1[1]*e1[2] + λ_trans * e2[1]*e2[2] + λ_norm * e3[1]*e3[2] +
+                              λ_13 * (e1[1]*e3[2] + e3[1]*e1[2])
+                a13[idx, l] = λ_flow * e1[1]*e1[3] + λ_trans * e2[1]*e2[3] + λ_norm * e3[1]*e3[3] +
+                              λ_13 * (e1[1]*e3[3] + e3[1]*e1[3])
+                a23[idx, l] = λ_flow * e1[2]*e1[3] + λ_trans * e2[2]*e2[3] + λ_norm * e3[2]*e3[3] +
+                              λ_13 * (e1[2]*e3[3] + e3[2]*e3[3])
+            end
+        end
+    end
+
+    inv_L = inv(T(n_layers))
+    shell_avg = (
+        a11 = vec(sum(a11; dims = 2)) .* inv_L,
+        a22 = vec(sum(a22; dims = 2)) .* inv_L,
+        a12 = vec(sum(a12; dims = 2)) .* inv_L,
+        a13 = vec(sum(a13; dims = 2)) .* inv_L,
+        a23 = vec(sum(a23; dims = 2)) .* inv_L
+    )
+
+    layers = (; a11, a22, a12, a13, a23)
+    return (; zeta, layers, shell_avg)
+end
