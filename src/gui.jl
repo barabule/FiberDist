@@ -53,7 +53,10 @@ Base.@kwdef mutable struct AppState
     flow_line_half_len::Observable{Float64}                 # Flow segment half-length
 
     #material input
-    material::Observable{FiberMaterialParams{Float32}} = Observable(FiberMaterialParams{Float32}()) #actual material
+    polymer::Observable{Symbol} = Observable(:pa6)            #polymer matrix material
+    fiber::Observable{Symbol} = Observable(:gf)               # :gf or :cf
+    fiber_wt_fraction::Observable{Float32} = Observable(0.3)  #fiber weight fraction - from 5% to 65% 
+    material_params::Observable{FiberMaterialParams}          #material params for kinematics
     num_half_thickness_layers::Observable{Int} = Observable(9) #number of layers for the kinematics reconstruction
 
     # Interactive Input State
@@ -116,168 +119,7 @@ function set_visible_recursive!(scene::Scene, vis::Bool)
     end
 end
 
-"""
-    align_flow_segments!(pts::Vector{Point3f}, st, dx::Float32; n_iters::Int = 2)
 
-In-place post-processing filter for `flow_segments` (`[p1_start, p1_end, p2_start, p2_end, ...]`).
-Smooths tangent directions and laterally aligns upstream/downstream dashes onto coherent curves
-while keeping points offset along surface normals without BVH raycasts.
-"""
-function align_flow_segments!(pts::Vector{Point3f}, st, dx::Float32; n_iters::Int = 2)
-    n_segs = length(pts) ÷ 2
-    n_segs == 0 && return pts
-
-    centroids = st.centroids
-    normals   = st.normals
-    flow_dirs = st.flow_dir
-
-    active_tris = Vector{Int}(undef, n_segs)
-    k = 0
-    @inbounds for i in eachindex(centroids)
-        if sum(abs2, flow_dirs[i]) > 1f-6
-            k += 1
-            k <= n_segs && (active_tris[k] = i)
-        end
-    end
-    k == n_segs || return pts
-
-    cell_size = 1.6f0 * dx
-    inv_cell  = 1.0f0 / cell_size
-    search_r2 = (1.6f0 * dx)^2
-
-    grid = Dict{NTuple{3, Int}, Vector{Int}}()
-    sizehint!(grid, n_segs)
-
-    mids = Vector{Point3f}(undef, n_segs)
-    dirs = Vector{Vec3f}(undef, n_segs)
-    half_lens = Vector{Float32}(undef, n_segs)
-
-    @inbounds for s in 1:n_segs
-        p0 = pts[2s - 1]
-        p1 = pts[2s]
-        mid = 0.5f0 * (p0 + p1)
-        seg = p1 - p0
-        len = norm(seg)
-
-        mids[s] = mid
-        half_lens[s] = 0.5f0 * len
-        dirs[s] = len > 1f-6 ? (seg / len) : Vec3f(1, 0, 0)
-
-        ck = (floor(Int, mid[1] * inv_cell), floor(Int, mid[2] * inv_cell), floor(Int, mid[3] * inv_cell))
-        bucket = get!(Vector{Int}, grid, ck)
-        push!(bucket, s)
-    end
-
-    anchors = copy(mids)
-    max_nudge = 0.48f0 * dx
-
-    for _ in 1:n_iters
-        new_mids = copy(mids)
-        new_dirs = copy(dirs)
-
-        @inbounds for s in 1:n_segs
-            tri_i = active_tris[s]
-            n = Vec3f(normals[tri_i])
-            u = dirs[s]
-            p = mids[s]
-
-            t_perp_raw = cross(n, u)
-            tp_len = norm(t_perp_raw)
-            tp_len > 1f-5 || continue
-            t_perp = t_perp_raw / tp_len
-
-            ck = (floor(Int, p[1] * inv_cell), floor(Int, p[2] * inv_cell), floor(Int, p[3] * inv_cell))
-
-            u_accum = 2.0f0 * u
-            lat_shift_sum = 0.0f0
-            w_lat_sum = 0.0f0
-
-            for dz in -1:1, dy in -1:1, dx_i in -1:1
-                bucket = get(grid, (ck[1] + dx_i, ck[2] + dy, ck[3] + dz), nothing)
-                bucket === nothing && continue
-
-                for nb in bucket
-                    nb == s && continue
-                    tri_nb = active_tris[nb]
-
-                    dot(n, Vec3f(normals[tri_nb])) > 0.75f0 || continue
-
-                    delta = mids[nb] - p
-                    d2 = sum(abs2, delta)
-                    (1f-8 < d2 <= search_r2) || continue
-
-                    u_nb = dirs[nb]
-                    cos_u = dot(u, u_nb)
-                    cos_u > 0.5f0 || continue
-
-                    d = sqrt(d2)
-                    w_dist = 1.0f0 - d / (1.6f0 * dx)
-
-                    u_accum += w_dist * u_nb
-
-                    along = abs(dot(delta, u)) / d
-                    w_align = w_dist * (along^2)
-                    if w_align > 1f-4
-                        lat_offset = dot(delta, t_perp)
-                        lat_shift_sum += w_align * lat_offset
-                        w_lat_sum += w_align
-                    end
-                end
-            end
-
-            u_tan = u_accum - dot(u_accum, n) * n
-            ut_len = norm(u_tan)
-            u_smooth = ut_len > 1f-5 ? (u_tan / ut_len) : u
-            new_dirs[s] = u_smooth
-
-            if w_lat_sum > 1f-4
-                p_candidate = p + (lat_shift_sum / w_lat_sum) * t_perp
-                total_offset = p_candidate - anchors[s]
-                tan_offset = total_offset - dot(total_offset, n) * n
-                off_len = norm(tan_offset)
-                if off_len > max_nudge
-                    tan_offset *= (max_nudge / off_len)
-                end
-                new_mids[s] = anchors[s] + tan_offset
-            end
-        end
-
-        mids .= new_mids
-        dirs .= new_dirs
-    end
-
-    @inbounds for s in 1:n_segs
-        step_vec = half_lens[s] * dirs[s]
-        pts[2s - 1] = mids[s] - step_vec
-        pts[2s]     = mids[s] + step_vec
-    end
-
-    return pts
-end
-
-function compute_flow_line_len(md::MeshData)
-    pts, tris = md.mesh.position, md.mesh.faces
-    isempty(tris) && return 1.0
-
-    len = 0.0
-    for tri in tris
-        i1, i2, i3 = tri
-        e12 = pts[i1] - pts[i2]
-        e13 = pts[i1] - pts[i3]
-        e23 = pts[i2] - pts[i3]
-        lmax = max(dot(e12, e12), max(dot(e13, e13), dot(e23, e23)))
-        len += sqrt(lmax)
-    end
-    return len / length(tris)
-end
-
-function first_triangle_centroid(md::MeshData)
-    verts = md.mesh.position
-    faces = md.mesh.faces
-    isempty(faces) && return Point3f(0, 0, 0)
-    f1 = first(faces)
-    return Point3f((verts[f1[1]] + verts[f1[2]] + verts[f1[3]]) / 3.0f0)
-end
 
 function pick_surface_point(state::AppState, mp)
     vp = state.lscene.scene.viewport[]
@@ -517,6 +359,14 @@ function init_app_state()::AppState
         slice_idx[] = clamp(round(Int, mx / 2), 1, mx)
     end
 
+    polymer = Observable(:pa6)
+    fiber_type =Observable(:gf)
+    fiber_wt_fraction = Observable(0.3f0)
+    mat_params = lift(polymer, fiber_type, fiber_wt_fraction) do pol, ft, fwf
+        fiber_material_preset(;polymer = pol, fiber = ft, wt_frac = fwf)
+    end
+
+
     state = AppState(
         fig                = fig,
         lscene             = lscene,
@@ -548,6 +398,10 @@ function init_app_state()::AppState
         slice_idx          = slice_idx,
         slice_max          = slice_max,
         flow_line_half_len = Observable(compute_flow_line_len(meshdata[])),
+        polymer            = polymer,
+        fiber              = fiber_type,
+        fiber_wt_fraction  = fiber_wt_fraction,
+        material_params    = mat_params,
     )
 
     on(state.meshdata) do md
@@ -1674,6 +1528,100 @@ function build_overlays_panel!(state::AppState, cb_card_rect::Observable{Rect2f}
     end
 end
 
+
+function build_material_selector!(state::AppState)
+    panel_size =  Vec2f(600, 40)
+    # left_margin = 400f0
+    top_margin = 10f0
+    sc = state.overlay_scene
+    mat_selector_panel = lift(state.lscene.scene.viewport) do vp
+        # o = vp.origin
+        w = vp.widths
+        origin = Point2f((w[1] -  panel_size[1]) / 2, w[2] - panel_size[2] - top_margin)
+        Rect2f(origin, panel_size)
+    end
+    draw_panel_card!(sc, mat_selector_panel; alpha = 0.9)
+
+
+    polymer_matrix_options = zip(
+        ["PC", "ABS", "PA6", "PA66", "PP", "PMMA", "PET", "PEEK", "PBT", "PPS"],
+        [:pc,  :abs,  :pa6,  :pa66,  :pp, :pmma,   :pet,  :peek, :pbt, :pps]
+    )
+
+    menu_matrix = Menu(
+                        sc;
+                        options = polymer_matrix_options,
+                        default = "PA6",
+                        direction = :down,
+                        fontsize = 11,
+                        textpadding = (6, 6, 4, 4),
+                        tellwidth = false,
+                        tellheight = false,
+    )
+
+    set_overdraw_recursive!(menu_matrix.blockscene)
+    on(menu_matrix.is_open) do _
+        set_overdraw_recursive!(menu_matrix.blockscene)
+    end
+    on(menu_matrix.selection) do sel
+        if !isnothing(sel)
+            state.polymer[] = sel            
+        end
+    end
+
+    fiber_type_options = zip(
+        ["GF", "CF"],
+        [:gf , :cf]
+    )
+    menu_fiber_type = Menu(
+                            sc;
+                            options = fiber_type_options,
+                            default = "GF",
+                            direction = :down,
+                            fontsize = 11,
+                            textpadding = (6, 6, 4, 4),
+                            tellwidth = false,
+                            tellheight = false,
+    )
+
+    set_overdraw_recursive!(menu_fiber_type.blockscene)
+    on(menu_fiber_type.is_open) do _
+        set_overdraw_recursive!(menu_fiber_type.blockscene)
+    end
+    on(menu_fiber_type.selection) do sel
+        if !isnothing(sel)
+            state.fiber[] = sel            
+        end
+    end
+
+    wt_fraction_options = zip(
+        ["$i" for i in 5:5:65],
+        collect(0.05:0.05:0.65)
+    )
+    menu_wt_fraction = Menu(
+                            sc;
+                            options = wt_fraction_options,
+                            default = "5",
+                            direction = :down,
+                            fontsize = 11,
+                            textpadding = (6, 6, 4, 4),
+                            tellwidth = false,
+                            tellheight = false,
+    )
+    set_overdraw_recursive!(menu_wt_fraction.blockscene)
+    on(menu_wt_fraction.is_open) do _
+        set_overdraw_recursive!(menu_wt_fraction.blockscene)
+    end
+    on(menu_wt_fraction.selection) do sel
+        if !isnothing(sel)
+            state.fiber_wt_fraction[] = sel           
+        end
+    end
+
+
+end
+
+
 function build_hud!(state::AppState)
     left_panel_w = 260
     cb_card_w    = 140
@@ -1684,6 +1632,7 @@ function build_hud!(state::AppState)
     cb_rect = build_colorbar_panel!(state, cb_card_w)
     build_overlays_panel!(state, cb_rect, cb_card_w)
     build_timeline_panel!(state)
+    build_material_selector!(state)
 end
 
 
