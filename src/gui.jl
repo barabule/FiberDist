@@ -1530,95 +1530,105 @@ end
 
 
 function build_material_selector!(state::AppState)
-    panel_size =  Vec2f(600, 40)
-    # left_margin = 400f0
-    top_margin = 10f0
+    panel_size = Vec2f(540, 42)
+    top_margin = 14f0
     sc = state.overlay_scene
+
     mat_selector_panel = lift(state.lscene.scene.viewport) do vp
-        # o = vp.origin
+        o = vp.origin
         w = vp.widths
-        origin = Point2f((w[1] -  panel_size[1]) / 2, w[2] - panel_size[2] - top_margin)
+        origin = Point2f(o[1] + (w[1] - panel_size[1]) / 2, o[2] + w[2] - panel_size[2] - top_margin)
         Rect2f(origin, panel_size)
     end
-    draw_panel_card!(sc, mat_selector_panel; alpha = 0.9)
+    draw_panel_card!(sc, mat_selector_panel; alpha = 0.90)
 
+    # Connect `gl.parent = state.fig` so GridPositions resolve to `state.fig.scene`
+    gl = GridLayout(
+        bbox = @lift(BBox(
+            $mat_selector_panel.origin[1] + 12,
+            $mat_selector_panel.origin[1] + $mat_selector_panel.widths[1] - 12,
+            $mat_selector_panel.origin[2] + 6,
+            $mat_selector_panel.origin[2] + $mat_selector_panel.widths[2] - 6
+        )),
+        colgap = 8,
+        alignmode = Inside(),
+    )
+    gl.parent = state.fig
 
-    polymer_matrix_options = zip(
+    polymer_matrix_options = collect(zip(
         ["PC", "ABS", "PA6", "PA66", "PP", "PMMA", "PET", "PEEK", "PBT", "PPS"],
-        [:pc,  :abs,  :pa6,  :pa66,  :pp, :pmma,   :pet,  :peek, :pbt, :pps]
-    )
+        [:pc,  :abs,  :pa6,  :pa66,  :pp,  :pmma,  :pet,  :peek,  :pbt,  :pps],
+    ))
 
+    fiber_type_options = collect(zip(
+        ["GF", "CF"],
+        [:gf,  :cf],
+    ))
+
+    wt_fraction_options = collect(zip(
+        ["$i %" for i in 5:5:65],
+        collect(0.05f0:0.05f0:0.65f0),
+    ))
+
+    Label(gl[1, 1], "Matrix:"; fontsize = 11, color = :gray20, halign = :right, tellwidth = true)
     menu_matrix = Menu(
-                        sc;
-                        options = polymer_matrix_options,
-                        default = "PA6",
-                        direction = :down,
-                        fontsize = 11,
-                        textpadding = (6, 6, 4, 4),
-                        tellwidth = false,
-                        tellheight = false,
+        gl[1, 2];
+        options = polymer_matrix_options,
+        default = "PA6",
+        direction = :down,
+        fontsize = 11,
+        textpadding = (6, 6, 4, 4),
     )
 
-    set_overdraw_recursive!(menu_matrix.blockscene)
-    on(menu_matrix.is_open) do _
-        set_overdraw_recursive!(menu_matrix.blockscene)
-    end
-    on(menu_matrix.selection) do sel
-        if !isnothing(sel)
-            state.polymer[] = sel            
+    Label(gl[1, 3], "Fiber:"; fontsize = 11, color = :gray20, halign = :right, tellwidth = true)
+    menu_fiber_type = Menu(
+        gl[1, 4];
+        options = fiber_type_options,
+        default = "GF",
+        direction = :down,
+        fontsize = 11,
+        textpadding = (6, 6, 4, 4),
+    )
+
+    Label(gl[1, 5], "Wt %:"; fontsize = 11, color = :gray20, halign = :right, tellwidth = true)
+    menu_wt_fraction = Menu(
+        gl[1, 6];
+        options = wt_fraction_options,
+        default = "30 %",
+        direction = :down,
+        fontsize = 11,
+        textpadding = (6, 6, 4, 4),
+    )
+
+    colsize!(gl, 1, Auto())
+    colsize!(gl, 2, Relative(0.28))
+    colsize!(gl, 3, Auto())
+    colsize!(gl, 4, Relative(0.20))
+    colsize!(gl, 5, Auto())
+    colsize!(gl, 6, Relative(0.24))
+
+    for m in (menu_matrix, menu_fiber_type, menu_wt_fraction)
+        set_overdraw_recursive!(m.blockscene)
+        on(m.is_open) do _
+            set_overdraw_recursive!(m.blockscene)
         end
     end
 
-    fiber_type_options = zip(
-        ["GF", "CF"],
-        [:gf , :cf]
-    )
-    menu_fiber_type = Menu(
-                            sc;
-                            options = fiber_type_options,
-                            default = "GF",
-                            direction = :down,
-                            fontsize = 11,
-                            textpadding = (6, 6, 4, 4),
-                            tellwidth = false,
-                            tellheight = false,
-    )
+    for elem in contents(gl)
+        elem isa Label && set_overdraw_recursive!(elem.blockscene)
+    end
 
-    set_overdraw_recursive!(menu_fiber_type.blockscene)
-    on(menu_fiber_type.is_open) do _
-        set_overdraw_recursive!(menu_fiber_type.blockscene)
+    on(menu_matrix.selection) do sel
+        sel !== nothing && (state.polymer[] = sel)
     end
     on(menu_fiber_type.selection) do sel
-        if !isnothing(sel)
-            state.fiber[] = sel            
-        end
-    end
-
-    wt_fraction_options = zip(
-        ["$i" for i in 5:5:65],
-        collect(0.05:0.05:0.65)
-    )
-    menu_wt_fraction = Menu(
-                            sc;
-                            options = wt_fraction_options,
-                            default = "5",
-                            direction = :down,
-                            fontsize = 11,
-                            textpadding = (6, 6, 4, 4),
-                            tellwidth = false,
-                            tellheight = false,
-    )
-    set_overdraw_recursive!(menu_wt_fraction.blockscene)
-    on(menu_wt_fraction.is_open) do _
-        set_overdraw_recursive!(menu_wt_fraction.blockscene)
+        sel !== nothing && (state.fiber[] = sel)
     end
     on(menu_wt_fraction.selection) do sel
-        if !isnothing(sel)
-            state.fiber_wt_fraction[] = sel           
-        end
+        sel !== nothing && (state.fiber_wt_fraction[] = sel)
     end
 
-
+    return mat_selector_panel
 end
 
 
