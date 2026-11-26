@@ -52,6 +52,10 @@ Base.@kwdef mutable struct AppState
     show_wireframe::Observable{Bool} = Observable(false)    # Mesh wireframe toggle
     flow_line_half_len::Observable{Float64}                 # Flow segment half-length
 
+    #material input
+    material::Observable{FiberMaterialParams{Float32}} = Observable(FiberMaterialParams{Float32}()) #actual material
+    num_half_thickness_layers::Observable{Int} = Observable(9) #number of layers for the kinematics reconstruction
+
     # Interactive Input State
     hovered_gate::Observable{Int} = Observable(0)           # Hovered gate index
     dragged_gate::Base.RefValue{Int} = Ref(0)               # Dragged gate index

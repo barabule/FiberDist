@@ -272,12 +272,11 @@ end
 
 """
     compute_triangle_layered_fot(
-        tri_fields;
-        n_layers::Int = 10,
-        core_exponent::Real = 2.0,
-        div_scale::Real = 5.0,
-        max_shear_tilt::Real = 0.08
-    )
+    tri_fields;
+    n_layers::Int = 10,
+    mat::FiberMaterialParams = FiberMaterialParams{eltype(tri_fields.divergence)}(),
+    thicknesses::Union{Nothing, AbstractVector} = nothing
+)
 
 Multi-threaded computation of the 5 independent components `(a11, a22, a12, a13, a23)`
 of the symmetric Fiber Orientation Tensor across `n_layers` through-thickness stations
@@ -289,100 +288,6 @@ Returns:
 - `layers`: NamedTuple of `(n_tris × n_layers)` matrices `(a11, a22, a12, a13, a23)`
 - `shell_avg`: NamedTuple of thickness-integrated `(n_tris,)` vectors `(a11, a22, a12, a13, a23)`
 """
-function compute_triangle_layered_fot(
-    tri_fields;
-    n_layers::Int = 10,
-    core_exponent::Real = 2.0,
-    div_scale::Real = 5.0,
-    max_shear_tilt::Real = 0.08
-)
-    flow_dirs = tri_fields.flow_dir
-    normals   = tri_fields.normals
-    divs      = tri_fields.divergence
-    welds     = tri_fields.masks.weld_lines
-
-    T = eltype(divs)
-    n_tris = length(flow_dirs)
-    @assert n_layers >= 1 "n_layers must be >= 1"
-
-    zeta = [T(l - 0.5) / T(n_layers) for l in 1:n_layers]
-
-    a11 = zeros(T, n_tris, n_layers)
-    a22 = zeros(T, n_tris, n_layers)
-    a12 = zeros(T, n_tris, n_layers)
-    a13 = zeros(T, n_tris, n_layers)
-    a23 = zeros(T, n_tris, n_layers)
-
-    p_exp   = T(core_exponent)
-    d_scale = T(div_scale)
-    s_tilt  = T(max_shear_tilt)
-
-    Threads.@threads for idx in 1:n_tris
-        @inbounds begin
-            e1 = flow_dirs[idx]
-            e3 = normals[idx]
-
-            if norm(e1) < T(1e-6)
-                for l in 1:n_layers
-                    a11[idx, l] = T(1) / T(3)
-                    a22[idx, l] = T(1) / T(3)
-                end
-                continue
-            end
-
-            e2      = normalize(cross(e3, e1))
-            is_weld = welds[idx]
-            div_u   = divs[idx]
-
-            α_div   = T(0.5) * (one(T) + tanh(div_u * d_scale))
-            c_flow  = (one(T) - α_div) * T(0.72) + α_div * T(0.18)
-            c_trans = (one(T) - α_div) * T(0.20) + α_div * T(0.74)
-            c_norm  = T(0.08)
-
-            s_flow, s_trans, s_norm = T(0.84), T(0.12), T(0.04)
-
-            for l in 1:n_layers
-                ζ = zeta[l]
-
-                if is_weld
-                    λ_flow, λ_trans, λ_norm, λ_13 = T(0.15), T(0.78), T(0.07), zero(T)
-                else
-                    w_shear = ζ^p_exp
-                    λ_flow  = (one(T) - w_shear) * c_flow  + w_shear * s_flow
-                    λ_trans = (one(T) - w_shear) * c_trans + w_shear * s_trans
-                    λ_norm  = (one(T) - w_shear) * c_norm  + w_shear * s_norm
-                    λ_13    = s_tilt * T(4) * ζ * (one(T) - ζ) * w_shear
-                end
-
-                a11[idx, l] = λ_flow * e1[1]^2 + λ_trans * e2[1]^2 + λ_norm * e3[1]^2 +
-                              T(2) * λ_13 * e1[1] * e3[1]
-                a22[idx, l] = λ_flow * e1[2]^2 + λ_trans * e2[2]^2 + λ_norm * e3[2]^2 +
-                              T(2) * λ_13 * e1[2] * e3[2]
-
-                a12[idx, l] = λ_flow * e1[1]*e1[2] + λ_trans * e2[1]*e2[2] + λ_norm * e3[1]*e3[2] +
-                              λ_13 * (e1[1]*e3[2] + e3[1]*e1[2])
-                a13[idx, l] = λ_flow * e1[1]*e1[3] + λ_trans * e2[1]*e2[3] + λ_norm * e3[1]*e3[3] +
-                              λ_13 * (e1[1]*e3[3] + e3[1]*e1[3])
-                a23[idx, l] = λ_flow * e1[2]*e1[3] + λ_trans * e2[2]*e2[3] + λ_norm * e3[2]*e3[3] +
-                              λ_13 * (e1[2]*e3[3] + e3[2]*e3[3])
-            end
-        end
-    end
-
-    inv_L = inv(T(n_layers))
-    shell_avg = (
-        a11 = vec(sum(a11; dims = 2)) .* inv_L,
-        a22 = vec(sum(a22; dims = 2)) .* inv_L,
-        a12 = vec(sum(a12; dims = 2)) .* inv_L,
-        a13 = vec(sum(a13; dims = 2)) .* inv_L,
-        a23 = vec(sum(a23; dims = 2)) .* inv_L
-    )
-
-    layers = (; a11, a22, a12, a13, a23)
-    return (; zeta, layers, shell_avg)
-end
-
-
 function compute_triangle_layered_fot(
     tri_fields;
     n_layers::Int = 10,

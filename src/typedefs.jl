@@ -289,7 +289,7 @@ function fiber_material_preset(
 ) where {T<:AbstractFloat}
     wf = clamp(T(wt_frac), zero(T), T(0.65))
     is_cf = (fiber === :cf)
-    is_amorphous = polymer in (:pc, :abs, :pmma, :pei, :psu)
+    is_amorphous = is_amorphous(polymer)
 
     # Effective crowding factor (CF has higher aspect ratio & interaction at same wt%)
     crowd = clamp(wf * (is_cf ? T(2.1) : T(1.5)), zero(T), one(T))
@@ -322,4 +322,9 @@ function fiber_material_preset(
         max_shear_tilt,
         weld_flow,
     )
+end
+
+
+function is_amorphous(polymer::Symbol)
+    return polymer in (:pc, :abs, :pmma, :pei, :psu)
 end
