@@ -328,3 +328,41 @@ end
 function check_is_amorphous(polymer::Symbol)
     return polymer in (:pc, :abs, :pmma, :pei, :psu)
 end
+
+
+
+"""
+    FOT5{T}
+
+Compact 5-component symmetric 2nd-order Fiber Orientation Tensor `(a11, a22, a12, a13, a23)`.
+Reconstruct `a33 = max(zero(T), one(T) - a[1] - a[2])`.
+"""
+const FOT5{T} = SVector{5, T}
+
+@inline get_a11(a::FOT5) = a[1]
+@inline get_a22(a::FOT5) = a[2]
+@inline get_a33(a::FOT5{T}) where {T} = max(zero(T), one(T) - a[1] - a[2])
+@inline get_a12(a::FOT5) = a[3]
+@inline get_a13(a::FOT5) = a[4]
+@inline get_a23(a::FOT5) = a[5]
+
+"""
+    LayeredFOT{T<:AbstractFloat}
+
+Through-thickness Fiber Orientation Tensor field stored in layer-major order
+`(n_layers × n_items)` so that querying the full through-thickness profile at any
+triangle or vertex `i` (`fot[i]`) is a contiguous, zero-allocation memory slice.
+"""
+struct LayeredFOT{T<:AbstractFloat}
+    zeta::Vector{T}              # Normalized depth stations ζ ∈ [0, 1] (core = 0, skin = 1)
+    layers::Matrix{FOT5{T}}      # (n_layers × n_items) contiguous SVector{5, T}
+    shell_avg::Vector{FOT5{T}}   # (n_items,) thickness-averaged FOT
+end
+
+Base.size(f::LayeredFOT) = size(f.layers)
+nlayers(f::LayeredFOT) = length(f.zeta)
+nitems(f::LayeredFOT)  = length(f.shell_avg)
+
+# Zero-allocation through-thickness profile at element/vertex `i`
+@inline Base.getindex(f::LayeredFOT, i::Int) = @view f.layers[:, i]
+@inline Base.getindex(f::LayeredFOT, l::Int, i::Int) = f.layers[l, i]

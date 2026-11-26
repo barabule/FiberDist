@@ -276,7 +276,8 @@ end
     n_layers::Int = 10,
     mat::FiberMaterialParams = FiberMaterialParams{eltype(tri_fields.divergence)}(),
     thicknesses::Union{Nothing, AbstractVector} = nothing
-)
+)::LayeredFOT
+    
 
 Multi-threaded computation of the 5 independent components `(a11, a22, a12, a13, a23)`
 of the symmetric Fiber Orientation Tensor across `n_layers` through-thickness stations
@@ -293,7 +294,7 @@ function compute_triangle_layered_fot(
     n_layers::Int = 10,
     mat::FiberMaterialParams = FiberMaterialParams{eltype(tri_fields.divergence)}(),
     thicknesses::Union{Nothing, AbstractVector} = nothing
-)
+)::LayeredFOT
     flow_dirs = tri_fields.flow_dir
     normals   = tri_fields.normals
     divs      = tri_fields.divergence
@@ -309,16 +310,14 @@ function compute_triangle_layered_fot(
     n_tris = length(flow_dirs)
     @assert n_layers >= 1 "n_layers must be >= 1"
 
-    zeta = [T(l - 0.5) / T(n_layers) for l in 1:n_layers]
+    zeta      = T[T(l - 0.5) / T(n_layers) for l in 1:n_layers]
+    layers    = Matrix{FOT5{T}}(undef, n_layers, n_tris)
+    shell_avg = Vector{FOT5{T}}(undef, n_tris)
 
-    a11 = zeros(T, n_tris, n_layers)
-    a22 = zeros(T, n_tris, n_layers)
-    a12 = zeros(T, n_tris, n_layers)
-    a13 = zeros(T, n_tris, n_layers)
-    a23 = zeros(T, n_tris, n_layers)
-
-    s_norm = max(zero(T), one(T) - m.s_flow - m.s_trans)
-    h_ref  = thicknesses === nothing ? one(T) : T(sum(thicknesses) / max(n_tris, 1))
+    s_norm    = max(zero(T), one(T) - m.s_flow - m.s_trans)
+    h_ref     = thicknesses === nothing ? one(T) : T(sum(thicknesses) / max(n_tris, 1))
+    inv_L     = inv(T(n_layers))
+    iso_fot   = FOT5{T}(T(1)/T(3), T(1)/T(3), zero(T), zero(T), zero(T))
 
     Threads.@threads for idx in 1:n_tris
         @inbounds begin
@@ -327,9 +326,9 @@ function compute_triangle_layered_fot(
 
             if norm(e1) < T(1e-6)
                 for l in 1:n_layers
-                    a11[idx, l] = T(1) / T(3)
-                    a22[idx, l] = T(1) / T(3)
+                    layers[l, idx] = iso_fot
                 end
+                shell_avg[idx] = iso_fot
                 continue
             end
 
@@ -337,7 +336,6 @@ function compute_triangle_layered_fot(
             is_weld = welds[idx]
             div_u   = divs[idx]
 
-            # Thicker sections cool slower -> wider core (higher effective exponent)
             h_ratio = thicknesses === nothing ? one(T) : clamp(T(thicknesses[idx]) / max(h_ref, T(1e-4)), T(0.5), T(2.0))
             p_eff   = m.core_exponent * sqrt(h_ratio)
 
@@ -346,6 +344,7 @@ function compute_triangle_layered_fot(
             c_norm  = m.c_norm
             c_trans = max(zero(T), one(T) - c_flow - c_norm)
 
+            acc = zero(FOT5{T})
             for l in 1:n_layers
                 ζ = zeta[l]
 
@@ -355,10 +354,9 @@ function compute_triangle_layered_fot(
                     λ_trans = max(zero(T), one(T) - λ_flow - λ_norm)
                     λ_13    = zero(T)
                 else
-                    w_shear = ζ^p_eff
-                    # Fountain-flow frozen skin drop localized near ζ ∈ [0.85, 1.0]
+                    w_shear    = ζ^p_eff
                     w_fountain = max(zero(T), (ζ - T(0.85)) / T(0.15))^2
-                    drop = m.skin_drop * w_fountain
+                    drop       = m.skin_drop * w_fountain
 
                     λ_flow  = (one(T) - w_shear) * c_flow  + w_shear * m.s_flow  - drop
                     λ_trans = (one(T) - w_shear) * c_trans + w_shear * m.s_trans + T(0.75) * drop
@@ -366,30 +364,37 @@ function compute_triangle_layered_fot(
                     λ_13    = m.max_shear_tilt * T(4) * ζ * (one(T) - ζ) * w_shear
                 end
 
-                a11[idx, l] = λ_flow * e1[1]^2 + λ_trans * e2[1]^2 + λ_norm * e3[1]^2 +
-                              T(2) * λ_13 * e1[1] * e3[1]
-                a22[idx, l] = λ_flow * e1[2]^2 + λ_trans * e2[2]^2 + λ_norm * e3[2]^2 +
-                              T(2) * λ_13 * e1[2] * e3[2]
+                a11 = λ_flow * e1[1]^2 + λ_trans * e2[1]^2 + λ_norm * e3[1]^2 + T(2) * λ_13 * e1[1] * e3[1]
+                a22 = λ_flow * e1[2]^2 + λ_trans * e2[2]^2 + λ_norm * e3[2]^2 + T(2) * λ_13 * e1[2] * e3[2]
+                a12 = λ_flow * e1[1]*e1[2] + λ_trans * e2[1]*e2[2] + λ_norm * e3[1]*e3[2] + λ_13 * (e1[1]*e3[2] + e3[1]*e1[2])
+                a13 = λ_flow * e1[1]*e1[3] + λ_trans * e2[1]*e2[3] + λ_norm * e3[1]*e3[3] + λ_13 * (e1[1]*e3[3] + e3[1]*e1[3])
+                a23 = λ_flow * e1[2]*e1[3] + λ_trans * e2[2]*e2[3] + λ_norm * e3[2]*e3[3] + λ_13 * (e1[2]*e3[3] + e3[2]*e3[3])
 
-                a12[idx, l] = λ_flow * e1[1]*e1[2] + λ_trans * e2[1]*e2[2] + λ_norm * e3[1]*e3[2] +
-                              λ_13 * (e1[1]*e3[2] + e3[1]*e1[2])
-                a13[idx, l] = λ_flow * e1[1]*e1[3] + λ_trans * e2[1]*e2[3] + λ_norm * e3[1]*e3[3] +
-                              λ_13 * (e1[1]*e3[3] + e3[1]*e1[3])
-                a23[idx, l] = λ_flow * e1[2]*e1[3] + λ_trans * e2[2]*e2[3] + λ_norm * e3[2]*e3[3] +
-                              λ_13 * (e1[2]*e3[3] + e3[2]*e3[3])
+                f_l = FOT5{T}(a11, a22, a12, a13, a23)
+                layers[l, idx] = f_l
+                acc += f_l
             end
+            shell_avg[idx] = acc * inv_L
         end
     end
 
-    inv_L = inv(T(n_layers))
-    shell_avg = (
-        a11 = vec(sum(a11; dims = 2)) .* inv_L,
-        a22 = vec(sum(a22; dims = 2)) .* inv_L,
-        a12 = vec(sum(a12; dims = 2)) .* inv_L,
-        a13 = vec(sum(a13; dims = 2)) .* inv_L,
-        a23 = vec(sum(a23; dims = 2)) .* inv_L
-    )
+    return LayeredFOT{T}(zeta, layers, shell_avg)
+end
 
-    layers = (; a11, a22, a12, a13, a23)
-    return (; zeta, layers, shell_avg)
+"""
+    project_fot_to_vertices(itp::AngleWeightInterpolator{T}, tri_fot::LayeredFOT{T}) -> LayeredFOT{T}
+
+Interpolates per-triangle `LayeredFOT` onto mesh vertices using the precomputed
+tip-angle sparse matrix `itp.W` (`n_verts × n_tris`).
+"""
+function project_fot_to_vertices(itp::AngleWeightInterpolator{T}, tri_fot::LayeredFOT{T})::LayeredFOT{T} where {T}
+    n_verts  = size(itp.W, 1)
+    n_layers = nlayers(tri_fot)
+
+    vert_layers = Matrix{FOT5{T}}(undef, n_layers, n_verts)
+    # Right-multiplying `(n_layers × n_tris) * W'` keeps vertex columns contiguous
+    mul!(vert_layers, tri_fot.layers, transpose(itp.W))
+
+    vert_avg = itp.W * tri_fot.shell_avg
+    return LayeredFOT{T}(copy(tri_fot.zeta), vert_layers, vert_avg)
 end
