@@ -366,6 +366,10 @@ function init_app_state()::AppState
         fiber_material_preset(;polymer = pol, fiber = ft, wt_frac = fwf)
     end
 
+    flow_line_half_len = lift(meshdata) do md
+        0.4 * compute_flow_line_len(md)
+    end
+
 
     state = AppState(
         fig                = fig,
@@ -397,7 +401,7 @@ function init_app_state()::AppState
         slice_axis         = slice_axis,
         slice_idx          = slice_idx,
         slice_max          = slice_max,
-        flow_line_half_len = Observable(compute_flow_line_len(meshdata[])),
+        flow_line_half_len = flow_line_half_len,
         polymer            = polymer,
         fiber              = fiber_type,
         fiber_wt_fraction  = fiber_wt_fraction,
@@ -412,7 +416,6 @@ function init_app_state()::AppState
         state.gates[] = new_gates
         state.solver_gates[] = with_computed_gate_delays(new_gates, state.voxeldata[])
         fit_camera_to_mesh!(state.lscene, md)
-        state.flow_line_half_len[] = compute_flow_line_len(md)
     end
 
     on(state.res) do _

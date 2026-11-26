@@ -232,6 +232,11 @@ function align_flow_segments!(pts::Vector{Point3f}, st, dx::Float32; n_iters::In
     return pts
 end
 
+"""
+    compute_flow_line_len(md::MeshData)
+
+Compute the average max edge length of the triangles in md.mesh
+"""
 function compute_flow_line_len(md::MeshData)
     pts, tris = md.mesh.position, md.mesh.faces
     isempty(tris) && return 1.0
