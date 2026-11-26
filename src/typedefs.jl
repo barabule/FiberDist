@@ -34,18 +34,7 @@ struct MeshData{T<:Real} #Struct contains a mesh and its acceleration struct
     adj::MeshAdjacency
 end
 
-function MeshData(mesh::GeometryBasics.AbstractMesh{3, T}) where T<:Real
-    faces = mesh.faces
-    if eltype(faces) <: TriangleFace
-        trimesh = mesh
-    end
-    tri_faces = decompose(TriangleFace, faces)
-    trimesh = GeometryBasics.Mesh(vertex_attributes(mesh), tri_faces)
 
-    tlas = TLAS([mesh], (mi, ti) -> UInt32(mi))
-    adj  = MeshAdjacency(trimesh)
-    return MeshData{T}(trimesh, tlas, adj)
-end
 
 function MeshData(mesh::GeometryBasics.AbstractMesh{3, T}) where T<:Real
     faces=  mesh.faces
