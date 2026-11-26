@@ -57,7 +57,9 @@ Base.@kwdef mutable struct AppState
     fiber::Observable{Symbol} = Observable(:gf)               # :gf or :cf
     fiber_wt_fraction::Observable{Float32} = Observable(0.3)  #fiber weight fraction - from 5% to 65% 
     material_params::Observable{FiberMaterialParams}          #material params for kinematics
-    num_half_thickness_layers::Observable{Int} = Observable(9) #number of layers for the kinematics reconstruction
+    num_half_thk_layers::Observable{Int} = Observable(9) #number of layers for the kinematics reconstruction
+    tri_fot::Observable{LayeredFOT{Float32}}                 #per vertex and layer fot
+    vertex_fot::Observable{LayeredFOT{Float32}}
 
     # Interactive Input State
     hovered_gate::Observable{Int} = Observable(0)           # Hovered gate index
@@ -370,6 +372,17 @@ function init_app_state()::AppState
         0.4 * compute_flow_line_len(md)
     end
 
+    num_half_thk_layers = Observable(10)
+
+    tri_fot = lift(stats, mat_params, num_half_thk_layers) do st, mat, n_l
+        compute_triangle_layered_fot(st; n_layers = n_l, mat = mat)
+    end
+
+    vertex_fot = lift(vertex_itp_f32, tri_fot) do itp, tfot
+        project_fot_to_vertices(itp, tfot)
+    end
+
+
 
     state = AppState(
         fig                = fig,
@@ -406,6 +419,9 @@ function init_app_state()::AppState
         fiber              = fiber_type,
         fiber_wt_fraction  = fiber_wt_fraction,
         material_params    = mat_params,
+        num_half_thk_layers = num_half_thk_layers,
+        tri_fot            = tri_fot,
+        vertex_fot         = vertex_fot,
     )
 
     on(state.meshdata) do md
