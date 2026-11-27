@@ -374,15 +374,12 @@ function init_app_state()::AppState
 
     num_half_thk_layers = Observable(10)
 
-    tri_fot = lift(stats, mat_params, num_half_thk_layers) do st, mat, n_l
-        compute_triangle_layered_fot(st; n_layers = n_l, mat = mat)
-    end
+    
+    #preliminary
+    tri_fot = Observable(compute_triangle_layered_fot(stats[]; n_layers = num_half_thk_layers[], mat = mat_params[]))
+    vertex_fot = Observable(project_fot_to_vertices(vertex_itp_f32[], tri_fot[]))
 
-    vertex_fot = lift(vertex_itp_f32, tri_fot) do itp, tfot
-        project_fot_to_vertices(itp, tfot)
-    end
-
-
+    
 
     state = AppState(
         fig                = fig,
@@ -440,8 +437,62 @@ function init_app_state()::AppState
         state.solver_gates[] = updated
     end
 
+    add_fot_update_functionality!(state)
+
+
     return state
 end
+
+
+function add_fot_update_functionality!(state::AppState)
+    function sync_fot!()
+        state.voxel_confirmed[] || return
+
+        st  = state.stats[]
+        itp = state.vertex_itp_f32[]
+        mat = state.material_params[]
+        n_l = max(state.num_half_thk_layers[], 1)
+
+        n_tris  = length(st.flow_dir)
+        n_verts = size(itp.W, 1)
+
+        # Skip transient intermediate state during mesh reload before `stats` and `vertex_itp_f32` both finish updating
+        size(itp.W, 2) == n_tris || return
+
+        tfot = state.tri_fot[]
+        if size(tfot.layers) != (n_l, n_tris)
+            tfot = compute_triangle_layered_fot(st; n_layers = n_l, mat = mat)
+            state.tri_fot.val = tfot
+        else
+            compute_triangle_layered_fot!(tfot, st; mat = mat)
+        end
+
+        vfot = state.vertex_fot[]
+        if size(vfot.layers) != (n_l, n_verts)
+            vfot = project_fot_to_vertices(itp, tfot)
+            state.vertex_fot.val = vfot
+        else
+            project_fot_to_vertices!(vfot, itp, tfot)
+        end
+
+        notify(state.tri_fot)
+        notify(state.vertex_fot)
+    end
+
+    onany(
+        state.stats,
+        state.vertex_itp_f32,
+        state.material_params,
+        state.num_half_thk_layers,
+        state.voxel_confirmed,
+    ) do _, _, _, _, _
+        sync_fot!()
+    end
+
+    return nothing
+end
+
+
 
 
 # =============================================================================

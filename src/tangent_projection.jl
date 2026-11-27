@@ -403,3 +403,137 @@ function project_fot_to_vertices(itp::AngleWeightInterpolator{T}, tri_fot::Layer
     vert_avg = itp.W * tri_fot.shell_avg
     return LayeredFOT{T}(copy(tri_fot.zeta), vert_layers, vert_avg)
 end
+
+
+"""
+    compute_triangle_layered_fot!(
+        dest::LayeredFOT{T},
+        tri_fields;
+        mat::FiberMaterialParams = FiberMaterialParams{T}(),
+        thicknesses::Union{Nothing, AbstractVector} = nothing
+    ) -> LayeredFOT{T}
+
+Zero-allocation in-place update of `dest` (`(n_layers × n_tris)`).
+Requires `size(dest.layers) == (length(dest.zeta), length(tri_fields.flow_dir))`.
+"""
+function compute_triangle_layered_fot!(
+    dest::LayeredFOT{T},
+    tri_fields;
+    mat::FiberMaterialParams = FiberMaterialParams{T}(),
+    thicknesses::Union{Nothing, AbstractVector} = nothing
+)::LayeredFOT{T} where {T<:AbstractFloat}
+    flow_dirs = tri_fields.flow_dir
+    normals   = tri_fields.normals
+    divs      = tri_fields.divergence
+    welds     = tri_fields.masks.weld_lines
+
+    n_layers = nlayers(dest)
+    n_tris   = length(flow_dirs)
+    @assert size(dest.layers) == (n_layers, n_tris) "LayeredFOT size mismatch: expected ($n_layers, $n_tris), got $(size(dest.layers))"
+    @assert length(dest.shell_avg) == n_tris
+
+    m = FiberMaterialParams{T}(
+        T(mat.s_flow), T(mat.s_trans), T(mat.c_flow_plug), T(mat.c_flow_div),
+        T(mat.c_norm), T(mat.core_exponent), T(mat.skin_drop), T(mat.div_scale),
+        T(mat.max_shear_tilt), T(mat.weld_flow)
+    )
+
+    zeta      = dest.zeta
+    layers    = dest.layers
+    shell_avg = dest.shell_avg
+
+    @inbounds for l in 1:n_layers
+        zeta[l] = T(l - 0.5) / T(n_layers)
+    end
+
+    s_norm  = max(zero(T), one(T) - m.s_flow - m.s_trans)
+    h_ref   = thicknesses === nothing ? one(T) : T(sum(thicknesses) / max(n_tris, 1))
+    inv_L   = inv(T(n_layers))
+    iso_fot = FOT5{T}(T(1)/T(3), T(1)/T(3), zero(T), zero(T), zero(T))
+
+    Threads.@threads for idx in 1:n_tris
+        @inbounds begin
+            e1 = flow_dirs[idx]
+            e3 = normals[idx]
+
+            if norm(e1) < T(1e-6)
+                for l in 1:n_layers
+                    layers[l, idx] = iso_fot
+                end
+                shell_avg[idx] = iso_fot
+                continue
+            end
+
+            e2      = normalize(cross(e3, e1))
+            is_weld = welds[idx]
+            div_u   = divs[idx]
+
+            h_ratio = thicknesses === nothing ? one(T) : clamp(T(thicknesses[idx]) / max(h_ref, T(1e-4)), T(0.5), T(2.0))
+            p_eff   = m.core_exponent * sqrt(h_ratio)
+
+            α_div   = T(0.5) * (one(T) + tanh(div_u * m.div_scale))
+            c_flow  = (one(T) - α_div) * m.c_flow_plug + α_div * m.c_flow_div
+            c_norm  = m.c_norm
+            c_trans = max(zero(T), one(T) - c_flow - c_norm)
+
+            acc = zero(FOT5{T})
+            for l in 1:n_layers
+                ζ = zeta[l]
+
+                if is_weld
+                    λ_flow  = m.weld_flow
+                    λ_norm  = c_norm
+                    λ_trans = max(zero(T), one(T) - λ_flow - λ_norm)
+                    λ_13    = zero(T)
+                else
+                    w_shear    = ζ^p_eff
+                    w_fountain = max(zero(T), (ζ - T(0.85)) / T(0.15))^2
+                    drop       = m.skin_drop * w_fountain
+
+                    λ_flow  = (one(T) - w_shear) * c_flow  + w_shear * m.s_flow  - drop
+                    λ_trans = (one(T) - w_shear) * c_trans + w_shear * m.s_trans + T(0.75) * drop
+                    λ_norm  = (one(T) - w_shear) * c_norm  + w_shear * s_norm    + T(0.25) * drop
+                    λ_13    = m.max_shear_tilt * T(4) * ζ * (one(T) - ζ) * w_shear
+                end
+
+                a11 = λ_flow * e1[1]^2 + λ_trans * e2[1]^2 + λ_norm * e3[1]^2 + T(2) * λ_13 * e1[1] * e3[1]
+                a22 = λ_flow * e1[2]^2 + λ_trans * e2[2]^2 + λ_norm * e3[2]^2 + T(2) * λ_13 * e1[2] * e3[2]
+                a12 = λ_flow * e1[1]*e1[2] + λ_trans * e2[1]*e2[2] + λ_norm * e3[1]*e3[2] + λ_13 * (e1[1]*e3[2] + e3[1]*e1[2])
+                a13 = λ_flow * e1[1]*e1[3] + λ_trans * e2[1]*e2[3] + λ_norm * e3[1]*e3[3] + λ_13 * (e1[1]*e3[3] + e3[1]*e1[3])
+                a23 = λ_flow * e1[2]*e1[3] + λ_trans * e2[2]*e2[3] + λ_norm * e3[2]*e3[3] + λ_13 * (e1[2]*e3[3] + e3[2]*e3[3])
+
+                f_l = FOT5{T}(a11, a22, a12, a13, a23)
+                layers[l, idx] = f_l
+                acc += f_l
+            end
+            shell_avg[idx] = acc * inv_L
+        end
+    end
+
+    return dest
+end
+
+"""
+    project_fot_to_vertices!(
+        dest::LayeredFOT{T},
+        itp::AngleWeightInterpolator{T},
+        tri_fot::LayeredFOT{T}
+    ) -> LayeredFOT{T}
+
+Zero-allocation in-place sparse face-to-vertex projection of `tri_fot` into `dest`.
+"""
+function project_fot_to_vertices!(
+    dest::LayeredFOT{T},
+    itp::AngleWeightInterpolator{T},
+    tri_fot::LayeredFOT{T}
+)::LayeredFOT{T} where {T}
+    n_verts  = size(itp.W, 1)
+    n_layers = nlayers(tri_fot)
+    @assert size(dest.layers) == (n_layers, n_verts)
+    @assert length(dest.shell_avg) == n_verts
+
+    copyto!(dest.zeta, tri_fot.zeta)
+    mul!(dest.layers, tri_fot.layers, transpose(itp.W))
+    mul!(dest.shell_avg, itp.W, tri_fot.shell_avg)
+    return dest
+end
