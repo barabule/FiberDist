@@ -390,6 +390,11 @@ tip-angle sparse matrix `itp.W` (`n_verts × n_tris`).
 function project_fot_to_vertices(itp::AngleWeightInterpolator{T}, tri_fot::LayeredFOT{T})::LayeredFOT{T} where {T}
     n_verts  = size(itp.W, 1)
     n_layers = nlayers(tri_fot)
+    
+    sz_itp = size(itp.W) # n tris x n_verts
+    sz_tri_fot = size(tri_fot.layers) # nlayers x ntris
+    # n_layers x ntris * ntris x nverts = n_layers x nverts
+    @assert sz_itp[2] == sz_tri_fot[2] "Inconsistent size: itp: $(sz_itp), tri_fot: $(sz_tri_fot)"
 
     vert_layers = Matrix{FOT5{T}}(undef, n_layers, n_verts)
     # Right-multiplying `(n_layers × n_tris) * W'` keeps vertex columns contiguous
