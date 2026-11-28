@@ -17,7 +17,7 @@ using Printf
 using Random
 using Adapt
 using NativeFileDialog
-
+using JLD
 
 include("typedefs.jl") #types
 
@@ -34,6 +34,8 @@ include("tangent_projection.jl") # stage IV project to surface mesh per triangle
 # include("sparse_bricks.jl")
 # using .SparseBrick
 
+
+include("savefile.jl") #save / load functionality
 
 include("viz.jl") #extra viz
 include("gui.jl")
