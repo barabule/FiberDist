@@ -74,8 +74,8 @@ end
 
     layered_fot = FD.compute_triangle_layered_fot(meshproj)
 
-    @test size(layered_fot.layers.a11)[1] == length(meshdata.mesh.faces)
-
+    # @test size(layered_fot.layers.a11)[1] == length(meshdata.mesh.faces)
+    @test size(layered_fot.layers)[2] ==length(meshdata.mesh.faces)
     #half res
     voxeldata = FD.VoxelData(meshdata; fullres = false)
     @test size(voxeldata.grid) == size(voxeldata.thickness)
@@ -231,20 +231,22 @@ end
         n_layers = 10
         layered_fot = FD.compute_triangle_layered_fot(meshproj; n_layers = n_layers)
 
-        @test size(layered_fot.layers.a11) == (n_faces, n_layers)
-        @test length(layered_fot.shell_avg.a11) == n_faces
+        @test size(layered_fot.layers) == (n_layers, n_faces)
+        @test length(layered_fot.shell_avg) == n_faces
 
         for idx in (tri_corner_thin, tri_corner_thick)
-            a11_avg = layered_fot.shell_avg.a11[idx]
-            a22_avg = layered_fot.shell_avg.a22[idx]
-            a33_avg = FD.get_a33(a11_avg, a22_avg)
+            # a11_avg = layered_fot.shell_avg.a11[idx]
+            # a22_avg = layered_fot.shell_avg.a22[idx]
+            # a33_avg = FD.FD.get_a33(a11_avg, a22_avg)
+            fot_avg = layered_fot.shell_avg[idx]
+            a11_avg, a22_avg, a33_avg = FD.get_a11(fot_avg), FD.get_a22(fot_avg), FD.get_a33(fot_avg)
             @test isapprox(a11_avg + a22_avg + a33_avg, 1.0f0; atol = 1f-5)
             @test a33_avg < 0.12f0
 
             e1 = meshproj.flow_dir[idx]
-            A_skin_11 = layered_fot.layers.a11[idx, end]
-            A_skin_22 = layered_fot.layers.a22[idx, end]
-            A_skin_12 = layered_fot.layers.a12[idx, end]
+          
+            A_skin = layered_fot.layers[end, idx]
+            A_skin_11, A_skin_22, A_skin_12 = FD.get_a11(A_skin), FD.get_a22(A_skin), FD.get_a12(A_skin)
             a_flow_skin = A_skin_11 * e1[1]^2 + A_skin_22 * e1[2]^2 + 2.0f0 * A_skin_12 * e1[1] * e1[2]
             @test a_flow_skin > 0.75f0
         end
@@ -428,11 +430,11 @@ end
         GeometryBasics.TriangleFace(2, 3, 4),
         GeometryBasics.TriangleFace(3, 1, 4),
     ]
-    tet_md = MeshData(GeometryBasics.mesh(pts, tris))
+    tet_md = FD.MeshData(GeometryBasics.mesh(pts, tris))
 
     gates = [
-        ValveGate(position = SVector{3, Float32}(0.0f0, 0.0f0, 0.0f0), radius = 1.2f0, open_time = 0.0f0),
-        ValveGate(position = SVector{3, Float32}(10.0f0, 0.0f0, 0.0f0), radius = 2.5f0, open_time = 0.35f0),
+        FD.ValveGate(position = SVector{3, Float32}(0.0f0, 0.0f0, 0.0f0), radius = 1.2f0, open_time = 0.0f0),
+        FD.ValveGate(position = SVector{3, Float32}(10.0f0, 0.0f0, 0.0f0), radius = 2.5f0, open_time = 0.35f0),
     ]
 
     src = (
@@ -451,16 +453,16 @@ end
     )
 
     # 2. Verify Observable-wrapped fields produce the exact same Dict as plain values
-    src_obs = NamedTuple{keys(src)}(Observable.(values(src)))
-    @test project_to_dict(src) == project_to_dict(src_obs)
+    src_obs = NamedTuple{keys(src)}(FD.Observable.(values(src)))
+    @test FD.project_to_dict(src) == FD.project_to_dict(src_obs)
 
     # 3. Roundtrip through JLD2 on disk
     mktempdir() do tmpdir
         path = joinpath(tmpdir, "tet_project.jld2")
-        save_project_dict(path, project_to_dict(src))
+        FD.save_project_dict(path, FD.project_to_dict(src))
         @test isfile(path)
 
-        restored = dict_to_project(load_project_dict(path))
+        restored = FD.dict_to_project(FD.load_project_dict(path))
 
         @test restored.current_filepath    == src.current_filepath
         @test restored.is_cad_file         == src.is_cad_file

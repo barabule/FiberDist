@@ -109,10 +109,14 @@ end
 ##Generic storage and retrieval
 
 function save_project_dict(filepath::AbstractString, data::AbstractDict)
-    jldsave(filepath; compress = true, project = Dict{String, Any}(data))
+    jldopen(filepath, "w"; compress = true) do file
+        file["project"] = Dict{String, Any}(data)
+    end
     return filepath
 end
 
 function load_project_dict(filepath::AbstractString)::Dict{String, Any}
-    return load(filepath, "project")::Dict{String, Any}
+    return jldopen(filepath, "r") do file
+        file["project"]::Dict{String, Any}
+    end
 end

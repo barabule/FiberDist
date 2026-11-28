@@ -17,7 +17,7 @@ using Printf
 using Random
 using Adapt
 using NativeFileDialog
-using JLD
+using JLD2
 
 include("typedefs.jl") #types
 
