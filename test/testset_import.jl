@@ -410,3 +410,78 @@ end
     @test length(state.fill_time[]) == length(step_md.mesh.position)
     @test all(isfinite, state.stats[].fill_time)
 end
+
+
+@testset "Save & Load" verbose = true begin
+
+
+    # 1. Construct a minimal 4-vertex, 4-triangle tetrahedron MeshData (no GUI/CAD)
+    pts = Point3f[
+        Point3f(0.0f0,  0.0f0,  0.0f0),
+        Point3f(10.0f0, 0.0f0,  0.0f0),
+        Point3f(5.0f0,  8.66f0, 0.0f0),
+        Point3f(5.0f0,  2.89f0, 8.16f0),
+    ]
+    tris = GeometryBasics.TriangleFace{Int}[
+        GeometryBasics.TriangleFace(1, 3, 2),
+        GeometryBasics.TriangleFace(1, 2, 4),
+        GeometryBasics.TriangleFace(2, 3, 4),
+        GeometryBasics.TriangleFace(3, 1, 4),
+    ]
+    tet_md = MeshData(GeometryBasics.mesh(pts, tris))
+
+    gates = [
+        ValveGate(position = SVector{3, Float32}(0.0f0, 0.0f0, 0.0f0), radius = 1.2f0, open_time = 0.0f0),
+        ValveGate(position = SVector{3, Float32}(10.0f0, 0.0f0, 0.0f0), radius = 2.5f0, open_time = 0.35f0),
+    ]
+
+    src = (
+        current_filepath    = "dummy_tet.step",
+        is_cad_file         = true,
+        cad_elem_size       = 1.5,
+        cad_min_curv        = 0.8,
+        cad_circle_pts      = 20,
+        meshdata            = tet_md,
+        res                 = 48,
+        gates               = gates,
+        polymer             = :pa66,
+        fiber               = :cf,
+        fiber_wt_fraction   = 0.40f0,
+        num_half_thk_layers = 9,
+    )
+
+    # 2. Verify Observable-wrapped fields produce the exact same Dict as plain values
+    src_obs = NamedTuple{keys(src)}(Observable.(values(src)))
+    @test project_to_dict(src) == project_to_dict(src_obs)
+
+    # 3. Roundtrip through JLD2 on disk
+    mktempdir() do tmpdir
+        path = joinpath(tmpdir, "tet_project.jld2")
+        save_project_dict(path, project_to_dict(src))
+        @test isfile(path)
+
+        restored = dict_to_project(load_project_dict(path))
+
+        @test restored.current_filepath    == src.current_filepath
+        @test restored.is_cad_file         == src.is_cad_file
+        @test restored.cad_elem_size       ≈  src.cad_elem_size
+        @test restored.cad_min_curv        ≈  src.cad_min_curv
+        @test restored.cad_circle_pts      == src.cad_circle_pts
+        @test restored.res                 == src.res
+        @test restored.polymer             == src.polymer
+        @test restored.fiber               == src.fiber
+        @test restored.fiber_wt_fraction   ≈  src.fiber_wt_fraction
+        @test restored.num_half_thk_layers == src.num_half_thk_layers
+
+        @test GeometryBasics.coordinates(restored.meshdata.mesh) == GeometryBasics.coordinates(tet_md.mesh)
+        @test GeometryBasics.faces(restored.meshdata.mesh)       == GeometryBasics.faces(tet_md.mesh)
+
+        @test length(restored.gates) == length(src.gates)
+        for (g_out, g_in) in zip(restored.gates, src.gates)
+            @test g_out.position  ≈ g_in.position
+            @test g_out.radius    ≈ g_in.radius
+            @test g_out.open_time ≈ g_in.open_time
+        end
+    end
+end
+
